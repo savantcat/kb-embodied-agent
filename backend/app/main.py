@@ -1,0 +1,227 @@
+"""星云·企业知识库具身客服 —— Agent 编排服务（骨架）
+
+设计要点见 ../ARCHITECTURE.md：
+- D1 关闭 SDK 内置 LLM 直连，由本服务接管"听→想→做→说"
+- D2 前端零密钥：appSecret 只在本服务使用，/api/session 下发短时限域凭证
+- D4 强制检索企业语料，命中不足即"不知道 + 转人工"
+- D5 工具结果以 Widget 指令返回，由前端渲染卡片
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+load_dotenv()
+
+APP_ID = os.getenv("XMOV_APP_ID", "")
+APP_SECRET = os.getenv("XMOV_APP_SECRET", "")
+GATEWAY = os.getenv("XMOV_GATEWAY", "https://nebula-agent.xingyun3d.com/user/v1/ttsa_v2/session")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+KB_PATH = Path(os.getenv("KB_PATH", "./kb"))
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")
+DEMO_MODE = os.getenv("DEMO_MODE", "online")
+SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "900"))
+
+# 演示用虚构语料（真实企业语料只存在本地 kb/，绝不入库）
+DEMO_KB = {
+    "营业时间": "本店每天 9:00-21:00 营业，节假日照常。",
+    "退换货": "未拆封商品 7 天内可退换，需提供购买凭证。",
+    "政策": "小微企业数字化改造补贴按设备与软件投入的一定比例补贴，需先备案后采购。",
+}
+
+app = FastAPI(title="KB Embodied Agent", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ChatIn(BaseModel):
+    session_id: str
+    text: str
+
+
+class Widget(BaseModel):
+    type: str
+    title: str
+    payload: dict
+
+
+# ---------------------------------------------------------------- 会话
+
+@app.post("/api/session")
+def create_session() -> dict:
+    """签发短时限域凭证。前端永远拿不到 appSecret 本体。"""
+    if DEMO_MODE == "offline":
+        return {
+            "mode": "offline",
+            "session_id": f"demo-{uuid.uuid4().hex[:8]}",
+            "ttl": SESSION_TTL,
+            "note": "离线演示模式：不连接星云实时驱动，不消耗积分",
+        }
+    if not APP_ID or not APP_SECRET:
+        raise HTTPException(503, "未配置 XMOV_APP_ID / XMOV_APP_SECRET（请复制 .env.example）")
+    return {
+        "mode": "online",
+        "session_id": f"s-{uuid.uuid4().hex[:12]}",
+        "app_id": APP_ID,
+        # 真实项目应改为向星云后端换取一次性 token；此处仅示范凭证不下发前端
+        "gateway": GATEWAY,
+        "ttl": SESSION_TTL,
+        "issued_at": int(time.time()),
+    }
+
+
+# ---------------------------------------------------------------- 检索（RAG）
+
+def retrieve(query: str, top_k: int = 3) -> list[tuple[str, str]]:
+    """最小可用检索：关键词命中。生产替换为向量 + 关键词混合检索（见 ARCHITECTURE D4）。"""
+    hits: list[tuple[str, str]] = []
+    for key, text in DEMO_KB.items():
+        if key in query:
+            hits.append((key, text))
+    if KB_PATH.is_dir():
+        for path in sorted(KB_PATH.glob("*.md")):
+            body = path.read_text(encoding="utf-8", errors="ignore")
+            for line in body.splitlines():
+                if line.strip() and line.strip()[:12] and line.strip()[:12] in query:
+                    hits.append((path.stem, line.strip()))
+    return hits[:top_k]
+
+
+# ---------------------------------------------------------------- 行动层（MCP）
+
+TOOLS = [
+    {"name": "kb.search", "desc": "检索企业知识库"},
+    {"name": "policy.selfcheck", "desc": "生成合规/补贴自查清单（返回卡片）"},
+    {"name": "quote.calc", "desc": "按商品与数量生成报价卡"},
+    {"name": "handoff.human", "desc": "转人工并留下联系方式"},
+]
+
+
+def call_tool(name: str, args: dict) -> Widget | None:
+    """MCP 工具调用桩：接入 MCP_SERVER_URL 后替换为真实 JSON-RPC 调用。"""
+    if name == "policy.selfcheck":
+        return Widget(
+            type="checklist",
+            title="补贴申报自查清单",
+            payload={"items": ["营业执照", "上年度报表", "设备清单与发票", "改造前照片"], "note": "示例数据"},
+        )
+    if name == "quote.calc":
+        return Widget(
+            type="quote",
+            title="报价卡",
+            payload={"sku": args.get("sku", "示例商品"), "qty": args.get("qty", 1), "total": "¥0.00", "note": "示例数据"},
+        )
+    return None
+
+
+# ---------------------------------------------------------------- 主链路
+
+@app.get("/api/tools")
+def list_tools() -> dict:
+    return {"tools": TOOLS, "transport": MCP_SERVER_URL or "local-stub"}
+
+
+@app.post("/api/chat")
+async def chat(body: ChatIn) -> dict:
+    """一次问答：检索 → 决策 → 生成 → （可选）工具调用 → 返回文本 + Widget。"""
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text 不能为空")
+
+    if DEMO_MODE == "offline":
+        return _offline_reply(text)
+
+    docs = retrieve(text)
+    widgets: list[Widget] = []
+
+    # 行动层触发（真实项目由 LLM function-calling 决策，这里用规则桩演示链路）
+    if any(k in text for k in ("补贴", "自查", "合规")):
+        w = call_tool("policy.selfcheck", {})
+        if w:
+            widgets.append(w)
+    if any(k in text for k in ("报价", "多少钱", "价格")):
+        w = call_tool("quote.calc", {"sku": "示例商品", "qty": 1})
+        if w:
+            widgets.append(w)
+
+    answer = await _ask_llm(text, docs)
+    if not docs and not widgets:
+        answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
+
+    return {
+        "text": answer,
+        "sources": [k for k, _ in docs],
+        "widgets": [w.model_dump() for w in widgets],
+        "state": ["Listen", "Think", "Speak"],
+    }
+
+
+async def _ask_llm(question: str, docs: list[tuple[str, str]]) -> str:
+    if not LLM_API_KEY:
+        return "（未配置 LLM_API_KEY，当前为本地骨架输出）" + (docs[0][1] if docs else "")
+    ctx = "\n".join(f"[{k}] {v}" for k, v in docs) or "（无检索结果，不得编造）"
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是企业门店的数字人员工。只依据提供的资料回答，资料不足就说不知道并建议转人工。回答口语化、简短，适合语音播报。"},
+            {"role": "user", "content": f"资料：\n{ctx}\n\n顾客问：{question}"},
+        ],
+        "temperature": 0.3,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+            json=payload,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _offline_reply(text: str) -> dict:
+    """离线演示：预置脚本，用于评审体验与无网络/无积分场景（D3）。"""
+    script = {
+        "你好": "您好，我是这家店里的智能导购，有什么可以帮您？",
+        "时间": "本店每天早九点到晚九点营业，节假日照常。",
+        "退货": "未拆封的商品七天内可以退换，麻烦带上购买凭证。",
+        "补贴": "我帮您列了一份补贴申报自查清单，需要的材料都在上面。",
+    }
+    for key, reply in script.items():
+        if key in text:
+            widgets = []
+            if key == "补贴":
+                widgets = [call_tool("policy.selfcheck", {})]
+            return {
+                "text": reply,
+                "sources": [],
+                "widgets": [w.model_dump() for w in widgets if w],
+                "state": ["Listen", "Think", "Speak"],
+                "mode": "offline",
+            }
+    return {"text": "（离线演示模式）这是一段预置回复。", "sources": [], "widgets": [], "mode": "offline"}
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {
+        "ok": True,
+        "demo_mode": DEMO_MODE,
+        "llm_configured": bool(LLM_API_KEY),
+        "xmov_configured": bool(APP_ID and APP_SECRET),
+        "kb_path": str(KB_PATH),
+    }

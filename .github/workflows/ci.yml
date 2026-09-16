@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+      - name: Import check
+        run: python -c "import sys; sys.path.insert(0,'backend'); import app.main; print('import ok')"
+      - name: Secret scan
+        run: |
+          if grep -rnE "(sk-[A-Za-z0-9]{16,}|app_secret\s*=\s*\"[^\"]+\")" --include="*.py" --include="*.html" . ; then
+            echo "发现疑似密钥，拒绝合入"; exit 1
+          fi
+          echo "secret scan ok"
