@@ -43,6 +43,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .empty{color:var(--dim);padding:24px;text-align:center;font-size:13px}
 .hint{color:var(--dim);font-size:12px;padding:0 20px 16px}
 kbd{background:#0d1218;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:11px}
+@media(max-width:760px){
+  .wrap{grid-template-columns:1fr;gap:8px;padding:8px}
+  .panel{min-height:auto}
+  .queue{max-height:170px}
+  .chat{max-height:300px}
+  h1 small{display:none}
+  .hint{display:none}
+}
 </style>
 </head>
 <body>
@@ -182,6 +190,43 @@ $("#btnClose").onclick = async () => {
 
 loadQueue();
 setInterval(poll, 3000);
+
+// ===== 演示模式：自动模拟坐席操作（真实使用时由人工坐席点击）=====
+const AUTODEMO = location.search.indexOf("autodemo=1") >= 0;
+if (AUTODEMO){
+  const note = document.createElement("div");
+  note.className = "hint";
+  note.style.cssText = "color:#f59e0b;padding:6px 20px;font-size:12px";
+  note.textContent = "演示模式：本页自动模拟坐席操作（接入 → 回复 → 转回数字客服），真实使用时由人工坐席手动点击。";
+  document.body.appendChild(note);
+  let stage = 0;
+  setInterval(async () => {
+    try{
+      if (stage === 0){
+        const d = await (await fetch("/api/handoff/queue")).json();
+        const tk = (d.items || []).find(i => i.status === "queued");
+        if (tk){
+          await fetch("/api/handoff/claim", {method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({ticket: tk.id, agent: "坐席A"})});
+          await openTicket(tk.id);
+          stage = 1;
+        }
+      } else if (stage === 1){
+        await new Promise(r => setTimeout(r, 7000));
+        await fetch("/api/handoff/say", {method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ticket: CUR, text: "您好，我是人工坐席A，您的问题我已经看到了，我这就帮您处理。", role: "agent"})});
+        await poll();
+        stage = 2;
+      } else if (stage === 2){
+        await new Promise(r => setTimeout(r, 12000));
+        await fetch("/api/handoff/release", {method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ticket: CUR, note: "坐席交回数字客服"})});
+        await poll();
+        stage = 3;
+      }
+    }catch(e){}
+  }, 2500);
+}
 </script>
 </body>
 </html>

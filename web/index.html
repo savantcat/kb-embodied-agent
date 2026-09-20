@@ -20,20 +20,20 @@
   .badge.online{color:var(--ok);border-color:#1c6f52}
   .badge.offline{color:var(--warn);border-color:#7a5a12}
   .badge.text{color:#8fb0ff;border-color:#33507a}
-  main{display:grid;grid-template-columns:minmax(280px,42%) 1fr;gap:0;height:calc(100vh - 57px)}
-  section.stage{border-right:1px solid var(--line);padding:18px;display:flex;flex-direction:column;gap:12px;
+  main{display:grid;grid-template-columns:660px 1fr;gap:0;height:calc(100vh - 57px)}
+  section.stage{border-right:1px solid var(--line);padding:18px;display:flex;flex-direction:column;gap:12px;overflow:hidden;
                 background:radial-gradient(120% 80% at 50% 0%,#16204a 0%,#0b1020 70%)}
   /* 画面区：默认「圆脸占位」；数字人上线后切到大画面（16:9 或 9:16），可全屏 */
-  .avatar{position:relative;margin:6px auto 0;border-radius:14px;overflow:hidden;
+  .avatar{position:relative;margin:0 auto;border-radius:14px;overflow:hidden;flex:0 0 auto;
+          width:100%;height:420px;
           background:conic-gradient(from 0deg,#22305e,#3b56a8,#22305e);display:grid;place-items:center;
           box-shadow:0 0 0 1px var(--line), 0 18px 50px rgba(0,0,0,.5)}
-  .avatar.round{aspect-ratio:1/1;max-width:300px;border-radius:50%}
-  .avatar.landscape{aspect-ratio:16/9;width:100%;max-width:none;min-height:min(46vh,420px)}
-  .avatar.portrait{aspect-ratio:9/16;width:auto;max-width:min(46vh,420px);min-height:min(56vh,520px)}
-  .avatar:fullscreen,.avatar:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;aspect-ratio:auto}
-  .avatar .face{width:64%;height:64%;border-radius:50%;background:linear-gradient(180deg,#2a3768,#1b2450);
+  .avatar.round{ /* 占位态：与上线态同一盒子尺寸，仅换内部占位脸，不产生布局跳动 */ }
+  .avatar.landscape,.avatar.portrait{width:100%;height:420px}
+  .avatar:fullscreen,.avatar:-webkit-full-screen{width:100vw;height:100vh;border-radius:0}
+  .avatar .face{width:240px;height:240px;border-radius:50%;background:linear-gradient(180deg,#2a3768,#1b2450);
                 display:grid;place-items:center;color:var(--dim);font-size:13px;text-align:center;padding:8px}
-  .viewbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .viewbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto}
   .viewbar span.hint{font-size:11px;color:var(--dim)}
   .avatar[data-state="Speak"]{animation:speak 1.2s ease-in-out infinite}
   .avatar[data-state="Listen"]{animation:listen 2.4s ease-in-out infinite}
@@ -42,10 +42,10 @@
                    50%{box-shadow:0 0 0 6px rgba(91,140,255,.25),0 18px 50px rgba(0,0,0,.5)}}
   @keyframes listen{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
   @keyframes think{0%,100%{transform:rotate(0)}50%{transform:rotate(2deg)}}
-  .states{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .states{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;flex:0 0 auto}
   .chip{font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
   .chip.active{color:#fff;background:var(--accent);border-color:transparent}
-  .subtitle{min-height:64px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px}
+  .subtitle{min-height:64px;height:78px;overflow:auto;flex:0 0 auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px}
   .tools{margin-top:auto;font-size:12px;color:var(--dim)}
   .tools code{color:#cbd5ff}
   section.chat{display:flex;flex-direction:column;min-height:0}
@@ -68,7 +68,7 @@
   button.ghost{background:transparent;border:1px solid var(--line);color:var(--dim)}
   button:disabled{opacity:.5;cursor:not-allowed}
   .quick{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 10px}
-  .acts{display:flex;gap:6px;flex-wrap:wrap;padding:0}
+  .acts{display:flex;gap:6px;flex-wrap:wrap;padding:0;flex:0 0 auto}
   .acts button{font-size:12px;padding:8px 10px}
   .acts button.danger{background:#3a1220;border:1px solid #a03050;color:#ff9db4}
   .acts button.on{background:#a03050;color:#fff;border-color:transparent}
@@ -93,7 +93,7 @@
 .humanbanner{display:none;margin:8px 0 0;padding:9px 12px;border:1px solid #1e3a5f;background:#0f1c2e;color:#93c5fd;border-radius:8px;font-size:12.5px}
 .humanbanner.on{display:block}
 .netbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #5a4520;background:#241d0f;color:#f59e0b;border-radius:8px;font-size:12.5px}
-.embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden}
+.embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden;flex:1 1 auto;min-height:0}
 .embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
 .embody .elog{max-height:132px;overflow:auto;padding:6px 11px;font:12px/1.7 Consolas,Menlo,monospace}
 .embody .erow{display:flex;gap:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -107,6 +107,14 @@ body.a11y .msg{font-size:17px;line-height:1.9}
 body.a11y .quick button{font-size:15px;padding:9px 13px}
 body.a11y :root{--dim:#c9d1d9}
 .msg.human{border-left:3px solid #22c55e;background:#0f2417}
+.caption{position:fixed;left:0;right:0;bottom:0;padding:14px 28px;background:rgba(6,10,16,.92);
+  color:#e6edf3;font-size:19px;line-height:1.5;border-top:2px solid #3b82f6;display:none;z-index:99}
+.caption.on{display:block}
+.caption b{color:#93c5fd}
+.caption .step{color:#8b949e;font-size:13px;display:block;margin-bottom:3px}
+.demotip{position:fixed;right:18px;top:70px;z-index:99;display:none;max-width:340px;padding:12px 14px;
+  background:#1c1206;border:1px solid #5a4520;color:#f59e0b;border-radius:10px;font-size:14px;line-height:1.6}
+.demotip.on{display:block}
 </style>
 </head>
 <body>
@@ -142,6 +150,7 @@ body.a11y :root{--dim:#c9d1d9}
       <button class="ghost" id="btnAudit">🧾 操作留痕</button>
       <button class="ghost" id="btnMic">🎤 语音输入</button>
       <button class="ghost" id="btnStop">✋ 打断</button>
+      <button id="btnDemo" style="background:#7c2d12">🎬 自动演示</button>
       <button class="ghost" id="btnA11y" title="大字号 + 高对比 + 语音优先，适老化与无障碍">👵 适老化/无障碍</button>
       <button class="ghost" id="btnNet" title="模拟弱网/断网：数字人降级、恢复后自动重连">🌐 弱网演练</button>
       <button class="danger" id="btnKill">⛔ 一键停</button>
@@ -227,6 +236,141 @@ async function tryReconnect(){
     if (AGENT && typeof AGENT.reconnect === "function"){ await AGENT.reconnect(); emb("Reconnect","已下发重连指令"); }
   }catch(e){ emb("Reconnect","重连未成功：" + ((e && e.message) || e)); }
 }
+
+
+// ================= 自动演示（导演模式）：按 7 段脚本驱动整页，屏上带旁白字幕 =================
+let DEMO_RUNNING = false;
+function cap(step, text, on){
+  const el = document.getElementById("caption");
+  if (!el) return;
+  if (on === false){ el.className = "caption"; return; }
+  el.className = "caption on";
+  el.innerHTML = '<span class="step">' + (step || "") + '</span>' + (text || "");
+}
+function tip(html, on){
+  let el = document.getElementById("demotip");
+  if (!el){ el = document.createElement("div"); el.id = "demotip"; el.className = "demotip"; document.body.appendChild(el); }
+  el.className = "demotip" + (on === false ? "" : " on");
+  el.innerHTML = html || "";
+}
+const dwait = ms => new Promise(r => setTimeout(r, ms));
+async function dask(text, waitMs){
+  const i = document.getElementById("input");
+  // 防御：若上一轮的 BUSY 锁卡住（例如接管时请求被中断），演示会被静默吞掉 → 这里超时解锁
+  let t0 = Date.now();
+  while (BUSY && Date.now() - t0 < 20000){ await dwait(500); }
+  if (BUSY){ BUSY = false; cap("恢复", "检测到 BUSY 锁卡住，已自动解锁继续演示"); await dwait(600); }
+  i.value = text; document.getElementById("send").click();
+  await dwait(waitMs || 7000);
+}
+async function dclick(id, waitMs){
+  const b = document.getElementById(id);
+  if (b) b.click();
+  await dwait(waitMs || 1500);
+}
+async function waitFor(fn, timeout){
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout){
+    try{ if (fn()) return true; }catch(e){}
+    await dwait(600);
+  }
+  return false;
+}
+
+async function autoDemo(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  document.getElementById("btnDemo").textContent = "🎬 演示进行中…";
+  try{
+    cap("段 1 / 7 · 开场定位", "<b>KB-Embodied-Agent</b>：企业知识库具身客服 —— 别人做的是会说人话的数字人，我们让数字人成为标准的执行者。");
+    await say("你好，我是企业知识库数字员工，我可以查知识库、出卡片、也能随时把您转给真人同事。", {emotion:"happy", ka:"Hello"});
+    await dwait(9000);
+
+    cap("段 2 / 7 · 数字人答疑（RAG 检索 + 大模型）", "客户口述提问 → 检索企业知识库 → 大模型只依据资料作答，答不了就转人工。");
+    await dask("知识库为什么总是不好用？", 11000);
+
+    cap("段 3 / 7 · 行动层：不只是能对话，还能办事", "同一个入口直接出可操作卡片：合规清单卡、报价卡，而不是一堆文字。");
+    await dask("国标要自查多少项？", 11000);
+    await dask("交付一次要多久？", 10000);
+
+    cap("段 4 / 7 · 合规体检 + 信任层（可审计）", "国标 61 项逐条对照出整改清单；一键停可以全站停 AI 转人工；每次问答都留痕可回查。");
+    await dclick("btnSelfcheck", 9000);
+    await dclick("btnAudit", 6000);
+
+    cap("段 5 / 7 · 真转人工：出工单、人工接管、AI 暂停", "转人工不是出一张卡 —— 先生成真工单，坐席接管后 AI 暂停应答，客户不必再重复一遍。");
+    tip("<b>请到「人工坐席台」标签页操作：</b><br>1）点左侧工单 → <b>接入会话</b><br>2）输入一句回复并发送<br>3）点 <b>↩ 转数字客服</b><br><br>完成后本页会自动继续。");
+    await dask("帮我转人工", 6000);
+    const got = await waitFor(() => {
+      const st = document.querySelector("#log .card .tkstate");
+      return st && st.textContent.indexOf("接管") >= 0;
+    }, 60000);
+    if (!got){ cap("段 5 / 7 · 真转人工", "（未检测到坐席接入，继续演示。）"); }
+    await dwait(6000);
+    tip("", false);
+    await waitFor(() => document.getElementById("humanBanner").className.indexOf("on") < 0, 90000);
+    await dwait(9000);
+
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "记得住客户（不用重复说）、一键适老化、断网自动降级并重连。");
+    try{
+      await waitFor(() => !HANDOFF || HANDOFF.status === "released", 15000);
+      await dwait(2500);
+      await dask("我叫龙建洲，做小微企业知识库的，国标要自查多少项？", 11000);
+      await dask("我刚才说我叫什么？", 9000);
+      await dclick("btnA11y", 7000);
+      await dclick("btnA11y", 2500);
+      await dclick("btnNet", 6000);
+    }catch(e){
+      cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "（本段跳过：" + ((e && e.message) || e) + "）");
+      await dwait(1500);
+    }
+
+    cap("段 7 / 7 · 合规红队测试台（本作品最原创的一环）", "由红队客户数字人按国标条款发难、AI 客服应答、自动出可交付测试报告；含反向用例，防止『什么都转人工』作弊。");
+    await dwait(3000);
+    try{ releaseAvatar("goto-redteam"); }catch(e){}   // 先释放数字人线路，保证红队台两路可用
+    await dwait(1500);
+    location.href = "/audit.html?auto=1";
+  }catch(e){
+    cap("演示中断", "（" + ((e && e.message) || e) + "）");
+  }finally{
+    DEMO_RUNNING = false;
+    const b = document.getElementById("btnDemo");
+    if (b) b.textContent = "🎬 自动演示";
+  }
+}
+document.getElementById("btnDemo").onclick = autoDemo;
+// ?auto=6 → 只跑第 6 段（记忆/个性化 · 适老化 · 弱网降级），录制补拍用
+async function demo6(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  try{
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "记得住客户（不用重复说）、一键适老化、断网自动降级并重连。");
+    await dwait(2000);
+    await dask("我叫龙建洲，做小微企业知识库的", 11000);
+    await dask("我刚才说我叫什么？", 10000);
+    await dclick("btnA11y", 8000);
+    await dclick("btnA11y", 3000);
+    await dclick("btnNet", 8000);
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "答得出来（记得住）、看得清（大字号高对比）、断网也能自己接回来。");
+    await dwait(4000);
+  }catch(e){}
+  DEMO_RUNNING = false;
+}
+// ?auto=1 → 打开即自动开演（录制用：地址栏粘一次网址即可，不用找按钮）
+function autoDemoStart(){ try{ autoDemo(); }catch(e){} }
+if (location.search.indexOf("auto=6") >= 0){
+  setTimeout(() => { try{ demo6(); }catch(e){} }, 14000);
+}
+else if (location.search.indexOf("auto=1") >= 0){
+  const t0 = setInterval(() => {
+    // 以 DOM 就绪为准（徽标不再"连接中"），不依赖变量作用域
+    const b = document.getElementById("modeBadge");
+    if (b && b.textContent.indexOf("连接中") < 0){
+      clearInterval(t0);
+      setTimeout(autoDemoStart, 14000);  // 再等数字人连线与首帧渲染
+    }
+  }, 1000);
+}
+
 
 function setState(s, all){
   $("#avatar").dataset.state = s;
@@ -788,5 +932,6 @@ $("#voice").onclick = () => {
 };
 init();
 </script>
+<div id="caption" class="caption"></div>
 </body>
 </html>

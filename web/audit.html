@@ -179,6 +179,17 @@ async function init(){
     ]);
     SESS = s1;
     const av = s1.avatar || {};
+    // 心跳保活：红队跑完一条用例要 90 秒以上，没有心跳会被服务端按空闲回收 → 数字人中途消失
+    try{
+      const _sids = [s1.session_id, s2.session_id].filter(Boolean);
+      const _beat = async () => {
+        for (const sid of _sids){
+          try{ await fetch("/api/avatar/keepalive", {method:"POST",
+            headers:{"Content-Type":"application/json"}, body: JSON.stringify({session_id: sid})}); }catch(e){}
+        }
+      };
+      _beat(); setInterval(_beat, 20000);
+    }catch(e){}
     if (av.enabled && av.gateway_proxy){
       const ok = await loadSdkOnce(s1.sdk_url);
       const Ctor = window.XingyunAvatarAgent || window.XmovAvatar;
@@ -188,7 +199,10 @@ async function init(){
           RED   = await buildAgent(Ctor, "#stageR", av.gateway_proxy, s2.session_id);
           chip($("#badge"), "双数字人已就绪", "ok");
           // 注意：绝不能清空 stage 容器——SDK 的渲染节点就挂在里面（清了会把画面删掉）
-          document.querySelectorAll(".stage .ph").forEach(e => e.remove());
+          // 只删文本节点（占位文字），保留 canvas / widget 渲染节点
+          document.querySelectorAll(".stage").forEach(el => {
+            Array.from(el.childNodes).forEach(n => { if (n.nodeType === 3) n.remove(); });
+          });
         }catch(e){
           chip($("#badge"), "数字人降级为文字版", "bad");
           $("#stageA").textContent = "数字人未启动（文字版判定照常）";
@@ -308,7 +322,11 @@ window.addEventListener("beforeunload", () => {
       new Blob([JSON.stringify({session_id: sid})], {type:"application/json"}));
   });
 });
-init();
+init().then(() => {
+  if (location.search.indexOf("auto=1") >= 0){
+    setTimeout(() => { document.querySelector("#btnVeto").click(); }, 4000);
+  }
+});
 </script>
 </body>
 </html>
