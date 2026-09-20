@@ -73,6 +73,7 @@
 <main>
   <section class="stage">
     <div class="avatar" id="avatar" data-state="Listen">
+      <div id="avatar-stage" style="width:100%;height:100%;min-height:240px"></div>
       <div class="face" id="face">虚拟形象<br><span style="font-size:11px">（离线演示：不使用星云实时驱动）</span></div>
     </div>
     <div class="states" id="states">
@@ -97,7 +98,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let SESSION = null, SPEAK = true, BUSY = false;
+let SESSION = null, SPEAK = true, BUSY = false, AGENT = null;
 
 const QUICK = ["你好", "你们几点营业？", "退换货怎么算？", "我们店有什么补贴政策？", "帮我转人工"];
 
@@ -179,10 +180,60 @@ async function init(){
   }catch(e){ $("#tools").textContent = "工具列表加载失败"; }
 }
 
+// 星云 SDK 的状态名与本页三个展示态对齐（SDK 用 running/speaking/listening 等）
+function mapSdkState(st){
+  const s = String(st || "").toLowerCase();
+  if (s.indexOf("speak") >= 0 || s.indexOf("talk") >= 0) return "Speak";
+  if (s.indexOf("listen") >= 0 || s.indexOf("asr") >= 0) return "Listen";
+  if (s.indexOf("think") >= 0 || s.indexOf("load") >= 0 || s.indexOf("init") >= 0) return "Think";
+  return "Listen";
+}
+
 function loadSdk(url){
   const s = document.createElement("script");
-  s.src = url; s.onerror = () => $("#face").innerHTML = "星云 SDK 加载失败<br><span style='font-size:11px'>已回退为离线表现</span>";
+  s.src = url;
+  s.onerror = () => { $("#face").innerHTML = "星云 SDK 加载失败<br><span style='font-size:11px'>已回退为离线表现</span>"; };
+  s.onload = async () => {
+    const Ctor = window.XingyunAvatarAgent || window.XmovAvatar;
+    if (!Ctor){
+      $("#face").innerHTML = "SDK 已加载但未暴露构造器<br><span style='font-size:11px'>已回退为离线表现</span>";
+      return;
+    }
+    try{
+      AGENT = new Ctor({
+        containerId: "#avatar-stage",
+        appId: SESSION.app_id,
+        appSecret: SESSION.app_secret,
+        gatewayServer: SESSION.gateway,
+        // 关键：我方接管"想"这一环 —— 不给 SDK 传 brain_config（官方规定：要么不传、
+        // 要么给完整 LLM 配置，传半截会被平台判 422），只调用 speak() 播报我方 Agent 的答案，
+        // 因此 SDK 内置大脑永远不会被触发（不调用 ask()）。
+        // 若需在平台侧彻底关闭 ASR/Brain，按官方要求到「星云平台 → 应用管理」配置。
+        onStateChange(st){ setState(mapSdkState(st)); },
+        onVoiceStateChange(st){
+          if (st === "start") setState("Speak");
+          else if (st === "end") setState("Listen");
+        },
+        onMessage(err){ console.warn("星云 SDK:", err); }
+      });
+      if (typeof AGENT.init === "function") await AGENT.init();
+      $("#face").style.display = "none";
+      $("#subtitle").textContent = "在线模式：星云实时驱动已连接，说句话或输入问题试试。";
+      bubble("bot", "在线链路已就绪（表达层=星云实时驱动，大脑=我方 Agent + 企业知识库）。");
+    }catch(e){
+      AGENT = null;
+      bubble("bot", "星云 SDK 初始化失败：" + ((e && e.message) || e) + "（已回退离线表现）");
+    }
+  };
   document.head.appendChild(s);
+}
+
+// 播报：在线走星云实时驱动，离线回退浏览器语音
+async function say(text){
+  if (AGENT && typeof AGENT.speak === "function"){
+    try { await AGENT.speak(text); return; } catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
+  }
+  speak(text);
 }
 
 async function send(text){
@@ -205,8 +256,9 @@ async function send(text){
     bubble("bot", d.text, (d.sources && d.sources.length ? "来源：" + d.sources.join(" / ") : "") +
                           (d.mode ? (d.sources && d.sources.length ? " · " : "") + "mode=" + d.mode : ""));
     (d.widgets || []).forEach(card);
-    speak(d.text);
-    setTimeout(() => setState("Listen", ["Listen"]), Math.min(6000, 1200 + d.text.length * 90));
+    await say(d.text);
+    // 离线时用定时器模拟"说完回到聆听"；在线时由 SDK 的 onVoiceStateChange 回调驱动
+    if (!AGENT) setTimeout(() => setState("Listen", ["Listen"]), Math.min(6000, 1200 + d.text.length * 90));
   }catch(e){
     bubble("bot", "请求失败：" + e.message);
   }finally{

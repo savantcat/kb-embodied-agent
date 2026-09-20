@@ -1,8 +1,9 @@
 """星云·企业知识库具身客服 —— Agent 编排服务（骨架）
 
 设计要点见 ../ARCHITECTURE.md：
-- D1 关闭 SDK 内置 LLM 直连，由本服务接管"听→想→做→说"
-- D2 前端零密钥：appSecret 只在本服务使用，/api/session 下发短时限域凭证
+- D1 关闭 SDK 内置 LLM 直连（`auto_send_asr_to_llm=false`），由本服务接管"听→想→做→说"
+- D2 密钥不进仓库、不进前端源码：星云 `appSecret` 是**浏览器侧签名凭证**（厂商设计如此），
+     仅在会话建立时由 `/api/session` 下发；仓库只留 `.env.example`，`.env` 被 .gitignore 忽略
 - D4 强制检索企业语料，命中不足即"不知道 + 转人工"
 - D5 工具结果以 Widget 指令返回，由前端渲染卡片
 """
@@ -25,6 +26,8 @@ load_dotenv()
 APP_ID = os.getenv("XMOV_APP_ID", "")
 APP_SECRET = os.getenv("XMOV_APP_SECRET", "")
 GATEWAY = os.getenv("XMOV_GATEWAY", "https://nebula-agent.xingyun3d.com/user/v1/ttsa_v2/session")
+# 端到端版 SDK（XingyunAvatarAgent）：感知 + 大脑 + 表达；我方关闭其内置大脑，仅用其表达层
+SDK_URL = os.getenv("XMOV_SDK_URL", "https://media.xingyun3d.com/xingyun3d/general/litesdk/xmovAvatar_e2e@latest.js")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
@@ -64,7 +67,13 @@ class Widget(BaseModel):
 
 @app.post("/api/session")
 def create_session() -> dict:
-    """签发短时限域凭证。前端永远拿不到 appSecret 本体。"""
+    """签发会话配置。
+
+    星云 SDK 的 appSecret 属**浏览器侧签名凭证**（厂商文档明示，前端必须持有才能建立
+    实时会话）——本服务的职责是：密钥只从服务端 .env 读取、绝不出现在仓库与构建产物里，
+    并按需下发给已授权的会话。更高安全等级的做法是向星云后端换取一次性 token（见
+    docs/风险与边界.md「密钥边界」）。
+    """
     if DEMO_MODE == "offline":
         return {
             "mode": "offline",
@@ -78,10 +87,12 @@ def create_session() -> dict:
         "mode": "online",
         "session_id": f"s-{uuid.uuid4().hex[:12]}",
         "app_id": APP_ID,
-        # 真实项目应改为向星云后端换取一次性 token；此处仅示范凭证不下发前端
+        "app_secret": APP_SECRET,          # 浏览器侧签名凭证，由 SDK 用于建立实时会话
         "gateway": GATEWAY,
-        # 前端据此加载星云 SDK（前端永不持有 appSecret；未配置则前端自动回退离线表现）
-        "sdk_url": os.getenv("XMOV_SDK_URL", ""),
+        "sdk_url": SDK_URL,                # 端到端版 SDK（XingyunAvatarAgent）
+        # 我方接管"听→想→做→说"：关闭 SDK 的 ASR→LLM 自动链路与内置大脑，仅用其表达层
+        "agent_brain": "external",
+        "auto_send_asr_to_llm": False,
         "ttl": SESSION_TTL,
         "issued_at": int(time.time()),
     }
