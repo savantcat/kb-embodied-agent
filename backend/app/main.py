@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -124,14 +125,16 @@ class Widget(BaseModel):
 # 运营侧在后台打开开关后，才下发有时效的 e2eServer/authToken（**密钥永不出服务器**）。
 # 因账号驱动并发 = 1（实测 error_code 7），采用"一次一人 + 单场 TTL + 自动释放"的串行策略。
 POINTS_PER_MIN = float(os.getenv("POINTS_PER_MIN", "0.5"))   # 实测：1 分钟交互 ≈ 0.5 积分
-AVATAR_TTL = int(os.getenv("AVATAR_TTL", "180"))             # 单场秒数：3 分钟 ≈ 1.5 积分
+AVATAR_TTL = int(os.getenv("AVATAR_TTL", "180"))
+AVATAR_IDLE = int(os.getenv("AVATAR_IDLE", "45"))            # 无心跳多久算掉线（秒）
 AVATAR_DAILY_SESSIONS = int(os.getenv("AVATAR_DAILY_SESSIONS", "30"))
 AVATAR_DAILY_POINTS = float(os.getenv("AVATAR_DAILY_POINTS", "60"))
 IP_DAILY_SESSIONS = int(os.getenv("IP_DAILY_SESSIONS", "2"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
 AVATAR = {"enabled": False, "since": None, "reason": "默认关闭（后台开关控制）"}
-SLOT = {"sid": None, "until": 0.0, "start": 0.0, "xsid": None}
+AVATAR_CONCURRENCY = int(os.getenv("AVATAR_CONCURRENCY", "3"))   # 并发路数（魔珐线路放开后调此值即可）
+SLOTS: dict[str, dict] = {}          # sid -> {"until": 时长, "start": 起始, "xsid": 平台会话号}
 DAY = {"day": "", "sessions": 0, "seconds": 0.0}
 IP_USE: dict[str, int] = {}
 
@@ -150,24 +153,43 @@ def _points_used() -> float:
     return round(DAY["seconds"] / 60.0 * POINTS_PER_MIN, 2)
 
 
+def _sweep_slots() -> None:
+    """主动释放：TTL 到期、或客户端心跳中断（掉线/关页面/断网）即回收名额。"""
+    now = time.time()
+    for sid, s in list(SLOTS.items()):
+        if now >= s["until"]:
+            _release_slot(sid, "ttl_expired")
+        elif now - float(s.get("last_seen") or s["start"]) > AVATAR_IDLE:
+            _release_slot(sid, "idle_timeout")
+
+
+def _busy_count() -> int:
+    _sweep_slots()
+    return len(SLOTS)
+
+
 def _slot_busy() -> bool:
-    if SLOT["sid"] is not None and time.time() >= SLOT["until"]:
-        _release_slot("ttl_expired")
-    return SLOT["sid"] is not None
+    """是否已无空闲名额（默认 3 路并发，可用 AVATAR_CONCURRENCY 调整）。"""
+    return _busy_count() >= AVATAR_CONCURRENCY
 
 
-def _release_slot(reason: str) -> None:
-    if SLOT["sid"] is None:
+def _slot_of(sid: str) -> dict | None:
+    _sweep_slots()
+    return SLOTS.get(sid)
+
+
+def _release_slot(sid: str, reason: str) -> None:
+    s = SLOTS.pop(sid, None)
+    if not s:
         return
-    if SLOT.get("xsid"):            # 顺手结束平台会话，立刻把房间还回去
-        record_audit({"kind": "avatar-stop", "session_id": SLOT["sid"],
-                      "gateway": _stop_xmov_session(SLOT["xsid"], reason)})
-    secs = max(0.0, min(time.time() - SLOT["start"], float(AVATAR_TTL)))
+    if s.get("xsid"):               # 顺手结束平台会话，立刻把名额还回去
+        record_audit({"kind": "avatar-stop", "session_id": sid,
+                      "gateway": _stop_xmov_session(s["xsid"], reason)})
+    secs = max(0.0, min(time.time() - s["start"], float(AVATAR_TTL)))
     DAY["seconds"] += secs
-    record_audit({"kind": "avatar-release", "session_id": SLOT["sid"], "seconds": round(secs, 1),
+    record_audit({"kind": "avatar-release", "session_id": sid, "seconds": round(secs, 1),
                   "reason": reason, "day_seconds": round(DAY["seconds"], 1),
                   "est_points": _points_used()})
-    SLOT.update(sid=None, until=0.0, start=0.0, xsid=None)
 
 
 def _sign_xmov(path: str, body: dict) -> dict:
@@ -187,26 +209,6 @@ def _sign_xmov(path: str, body: dict) -> dict:
     }
 
 
-def _pick_e2e(data: dict) -> tuple[str, str]:
-    """从网关响应里取 (e2e 地址, 一次性 token)；字段名按内容识别，找不到就如实返回空。"""
-    flat: dict[str, object] = {}
-
-    def walk(o, p=""):
-        if isinstance(o, dict):
-            for k, v in o.items():
-                walk(v, f"{p}{k}.")
-        elif isinstance(o, list):
-            for i, v in enumerate(o):
-                walk(v, f"{p}{i}.")
-        else:
-            flat[p.rstrip(".")] = o
-
-    walk(data)
-    url = next((str(v) for k, v in flat.items()
-                if isinstance(v, str) and v.startswith(("ws://", "wss://"))), "")
-    tok = next((str(v) for k, v in flat.items()
-                if isinstance(v, str) and v and ("token" in k.lower() or "auth" in k.lower())), "")
-    return url, tok
 
 
 def _stop_xmov_session(xsid: str, reason: str = "admin_release") -> str:
@@ -229,27 +231,6 @@ def _stop_xmov_session(xsid: str, reason: str = "admin_release") -> str:
         return f"释放失败（{type(e).__name__}）"
 
 
-def _open_avatar_session() -> tuple[dict | None, str]:
-    """服务端向星云网关换取一次性会话（只把 e2eServer/authToken 交给浏览器）。"""
-    body = {"config": {"framedata_proto_version": 2, "raw_audio": False, "walk_version": 3},
-            "gateway_type": os.getenv("XMOV_GATEWAY_TYPE", "ttsa-gateway-lite"),
-            "session_speak_req_id": 1}
-    path = "/" + GATEWAY.split("//", 1)[-1].split("/", 1)[-1] if "//" in GATEWAY else GATEWAY
-    signed = _sign_xmov(path, body)
-    try:
-        with httpx.Client(timeout=20) as c:
-            r = c.post(GATEWAY, content=signed["data"].encode(), headers=signed["headers"])
-        d = r.json()
-    except Exception as e:
-        return None, f"网关不可达（{type(e).__name__}）"
-    if d.get("error_code") != 0:
-        return None, str(d.get("error_reason") or f"网关返回 error_code={d.get('error_code')}")
-    data = d.get("data") or {}
-    e2e, tok = _pick_e2e(data)
-    xsid = str(data.get("session_id") or "") if isinstance(data, dict) else ""
-    if not (e2e and tok):
-        return None, "网关未返回可用的 e2e 地址/token（字段未识别，已回退文字版）"
-    return {"e2e_server": e2e, "auth_token": tok, "xsid": xsid}, ""
 
 
 class AvatarToggle(BaseModel):
@@ -290,8 +271,10 @@ def create_session(request: Request) -> dict:
     if not AVATAR["enabled"]:
         reason = AVATAR["reason"] or "数字人演示当前未开放（后台开关控制）"
     elif _slot_busy():
-        wait = int(max(1, SLOT["until"] - time.time()))
-        reason = f"数字人正在为其他访客演示，请约 {wait} 秒后再试（同时仅服务 1 人）"
+        _sweep_slots()
+        wait = int(max(1, min((s["until"] for s in SLOTS.values()), default=time.time() + 5) - time.time()))
+        reason = (f"数字人演示名额已满（同时服务 {AVATAR_CONCURRENCY} 人），"
+                  f"请约 {wait} 秒后再试")
     elif DAY["sessions"] >= AVATAR_DAILY_SESSIONS:
         reason = f"今日数字人演示场次已用完（{AVATAR_DAILY_SESSIONS} 场/天）"
     elif _points_used() >= AVATAR_DAILY_POINTS:
@@ -304,22 +287,35 @@ def create_session(request: Request) -> dict:
         return {**base, "mode": "text", "ttl": SESSION_TTL,
                 "avatar": {"enabled": False, "reason": reason}}
 
-    sess, err = _open_avatar_session()
-    if not sess:
-        record_audit({"kind": "avatar-error", "error": err, "ip": ip})
-        return {**base, "mode": "text", "ttl": SESSION_TTL,
-                "avatar": {"enabled": False, "reason": err or "网关暂时不可用（文字版照常）"}}
-
+    # 关键：不再下发任何密钥、也不在后端预建会话 —— 下发"我们自己的网关代理地址"，
+    # SDK 拿它当 gatewayServer，由服务端完成签名后转发给星云网关（密钥永不出服务器）。
+    # 平台会话号由代理端在 SDK 发起请求时回填到槽位，用于管理侧强制释放。
     now = time.time()
-    SLOT.update(sid=sid, until=now + AVATAR_TTL, start=now, xsid=sess.get("xsid") or None)
+    SLOTS[sid] = {"until": now + AVATAR_TTL, "start": now, "last_seen": now,
+                  "xsid": None, "ws": ""}
     DAY["sessions"] += 1
     IP_USE[ip] = IP_USE.get(ip, 0) + 1
     record_audit({"kind": "avatar-open", "session_id": sid, "ip": ip, "ttl": AVATAR_TTL,
                   "day_sessions": DAY["sessions"], "est_points": _points_used()})
     return {**base, "mode": "online", "ttl": AVATAR_TTL,
-            "avatar": {"enabled": True, "e2e_server": sess["e2e_server"], "auth_token": sess["auth_token"],
+            "avatar": {"enabled": True, "gateway_proxy": "/api/xmov/gateway",
                        "ttl": AVATAR_TTL, "expires_at": int(now) + AVATAR_TTL,
-                       "note": "服务端已代为建立会话；浏览器只持有一次性 token，不持有任何密钥"}}
+                       "note": "会话经服务端代理建立并签名；浏览器不持有任何密钥"}}
+
+
+class KeepIn(BaseModel):
+    session_id: str = ""
+
+
+@app.post("/api/avatar/keepalive")
+def avatar_keepalive(body: KeepIn) -> dict:
+    """心跳：证明访客还在用。停跳即视为掉线，由清扫器主动释放名额。"""
+    s = _slot_of(body.session_id)
+    if not s:
+        return {"ok": False, "reason": "会话不存在或已释放", "busy": _busy_count()}
+    s["last_seen"] = time.time()
+    return {"ok": True, "remain": int(max(0, s["until"] - time.time())), "busy": _busy_count(),
+            "concurrency": AVATAR_CONCURRENCY}
 
 
 class ReleaseIn(BaseModel):
@@ -329,8 +325,11 @@ class ReleaseIn(BaseModel):
 @app.post("/api/avatar/release")
 def release_avatar(body: ReleaseIn) -> dict:
     """访客离开页面时主动释放名额（并发=1，早释放就是省钱）。"""
-    if SLOT["sid"] and (not body.session_id or body.session_id == SLOT["sid"]):
-        _release_slot("client_release")
+    if body.session_id and body.session_id in SLOTS:
+        _release_slot(body.session_id, "client_release")
+    elif not body.session_id:
+        for sid in list(SLOTS):
+            _release_slot(sid, "client_release")
     return {"ok": True, "busy": _slot_busy(), "day_sessions": DAY["sessions"],
             "day_points": _points_used()}
 
@@ -339,16 +338,30 @@ def release_avatar(body: ReleaseIn) -> dict:
 def public_stats() -> dict:
     """给前端展示的公开口径（不含任何密钥）。"""
     return {"avatar_enabled": AVATAR["enabled"], "avatar_reason": AVATAR["reason"],
-            "slot_busy": _slot_busy(), "day_sessions": DAY["sessions"],
+            "slot_busy": _slot_busy(), "concurrency": AVATAR_CONCURRENCY,
+            "busy_now": _busy_count(), "day_sessions": DAY["sessions"],
             "day_session_cap": AVATAR_DAILY_SESSIONS, "day_points": _points_used(),
             "day_points_cap": AVATAR_DAILY_POINTS, "avatar_ttl": AVATAR_TTL,
             "points_per_min": POINTS_PER_MIN}
 
 
 def _admin_ok(request: Request, token: str) -> bool:
+    """管理鉴权：优先口令；未设口令时只允许本机（含经 nginx 反代的本机请求）。
+
+    注意：走 nginx 反代时 request.client.host 是容器地址，真实来源在
+    X-Real-IP / X-Forwarded-For 里，必须一并识别，否则本机管理会被 403。
+    """
     if ADMIN_TOKEN and token == ADMIN_TOKEN:
         return True
-    host = (request.client.host if request.client else "") or ""
+    peer = (request.client.host if request.client else "") or ""
+    # 只有当直连来源本身是内网（如 nginx 容器）时才信任反代头，
+    # 否则外部可伪造 X-Real-IP: 127.0.0.1 绕过管理鉴权
+    private = peer.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.3", "192.168.", "127.", "::1"))
+    host = peer
+    if private:
+        host = (request.headers.get("x-real-ip")
+                or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+                or peer)
     return not ADMIN_TOKEN and host in ("127.0.0.1", "::1", "localhost")
 
 
@@ -356,7 +369,7 @@ def _admin_ok(request: Request, token: str) -> bool:
 def admin_stats(request: Request, token: str = "") -> dict:
     if not _admin_ok(request, token):
         raise HTTPException(403, "需要管理口令（ADMIN_TOKEN）")
-    return {**public_stats(), "slot": {k: v for k, v in SLOT.items()},
+    return {**public_stats(), "slots": {k: dict(v) for k, v in SLOTS.items()},
             "audit_tail": AUDIT[-8:], "ip_use": IP_USE}
 
 
@@ -365,13 +378,21 @@ def admin_release(request: Request, session_id: str = "", token: str = "") -> di
     """管理侧强制释放：立刻结束占用中的会话（并发=1，占死了就靠这个救）。"""
     if not _admin_ok(request, token):
         raise HTTPException(403, "需要管理口令（ADMIN_TOKEN）")
-    xsid = session_id or (SLOT.get("xsid") or "")
-    out = _stop_xmov_session(xsid, "admin_force_release") if xsid else "无会话号"
-    if SLOT["sid"]:
-        _release_slot("admin_force_release")
+    out = []
+    if session_id:
+        s = SLOTS.get(session_id)
+        if s and s.get("xsid"):
+            out.append(_stop_xmov_session(s["xsid"], "admin_force_release"))
+        if s:
+            _release_slot(session_id, "admin_force_release")
     else:
-        SLOT.update(xsid=None)
-    return {"ok": True, "gateway": out, "busy": _slot_busy()}
+        for sid in list(SLOTS):
+            s = SLOTS.get(sid) or {}
+            if s.get("xsid"):
+                out.append(_stop_xmov_session(s["xsid"], "admin_force_release"))
+            _release_slot(sid, "admin_force_release")
+    return {"ok": True, "gateway": out or "无会话可释放", "busy": _slot_busy(),
+            "concurrency": AVATAR_CONCURRENCY}
 
 
 @app.post("/api/admin/avatar")
@@ -383,9 +404,70 @@ def admin_avatar(body: AvatarToggle, request: Request) -> dict:
     AVATAR["since"] = time.strftime("%Y-%m-%d %H:%M:%S") if body.enabled else None
     AVATAR["reason"] = "数字人演示开放中（后台开关）" if body.enabled else "默认关闭（后台开关控制）"
     if not body.enabled:
-        _release_slot("admin_close")
+        for sid in list(SLOTS):
+            _release_slot(sid, "admin_close")
     record_audit({"kind": "avatar-switch", "enabled": AVATAR["enabled"], "at": AVATAR["since"]})
     return {"ok": True, **public_stats()}
+
+
+# ------------------------------------------------- 星云网关代理（密钥不出服务器，实验路径）
+@app.api_route("/api/xmov/{path:path}", methods=["POST", "DELETE", "GET"])
+async def xmov_gateway_proxy(path: str, request: Request) -> dict:
+    """把 SDK 发来的"统一会话接口"请求转发给真网关，并由服务端完成签名。
+
+    目的：让浏览器无需持有 appId/appSecret，只连我们自己的域名。
+    """
+    raw = await request.body()
+    body = {}
+    if raw:
+        try:
+            import json as _json
+            body = _json.loads(raw.decode() or "{}")
+        except Exception:
+            body = {}
+    record_audit({"kind": "xmov-proxy", "method": request.method, "path": path,
+                  "body_keys": sorted(body.keys()) if isinstance(body, dict) else "raw",
+                  "ua": (request.headers.get("user-agent") or "")[:60]})
+    target_path = "/" + GATEWAY.split("//", 1)[-1].split("/", 1)[-1] if "//" in GATEWAY else GATEWAY
+    method = request.method.lower()
+    compact = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    ts = int(time.time())
+    tok = hashlib.md5((target_path.lower() + method + compact + APP_SECRET + str(ts)).encode()).hexdigest()
+    headers = {"Content-Type": "application/json", "X-APP-ID": APP_ID,
+               "X-TOKEN": tok, "X-TIMESTAMP": str(ts)}
+    try:
+        with httpx.Client(timeout=25) as c:
+            r = c.request(request.method, GATEWAY, content=compact.encode(), headers=headers)
+        out = r.json()
+    except Exception as e:
+        record_audit({"kind": "xmov-proxy-error", "error": f"{type(e).__name__}"})
+        raise HTTPException(502, f"网关转发失败：{type(e).__name__}")
+    # 把平台会话号记到对应槽位，便于管理侧强制释放
+    demo_sid = request.headers.get("x-demo-session") or ""
+    got = (out.get("data") or {}).get("session_id") if isinstance(out, dict) else None
+    if demo_sid and got and demo_sid in SLOTS:
+        SLOTS[demo_sid]["xsid"] = str(got)
+        record_audit({"kind": "xmov-session-bound", "demo_session": demo_sid,
+                      "platform_session": str(got)[:24]})
+    if isinstance(out, dict) and out.get("error_code") not in (0, None):
+        record_audit({"kind": "xmov-proxy-denied", "error_code": out.get("error_code"),
+                      "reason": str(out.get("error_reason"))[:40]})
+    return out
+
+
+# ---------------------------------------------------------------- 后台清扫器
+@app.on_event("startup")
+async def _start_sweeper() -> None:
+    """每 15 秒扫一次：TTL 到期 / 心跳中断 / 平台侧会话残留，都主动释放。"""
+    async def _sweeper_loop():
+        while True:
+            try:
+                _sweep_slots()
+            except Exception:
+                pass
+            await asyncio.sleep(15)
+
+    asyncio.create_task(_sweeper_loop())
 
 
 # ---------------------------------------------------------------- 语料加载

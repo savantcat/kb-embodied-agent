@@ -308,6 +308,7 @@ async function init(){
       bubble("bot", "数字人演示已开启，本场限时 " + Math.round((av.ttl || 180) / 60) +
              " 分钟。会话由服务端代建，浏览器只持有一次性凭证。");
       startAvatarCountdown(av.ttl || 180);
+      startKeepalive();                       // 心跳：停跳即由服务端主动释放名额
       loadSdk(SESSION.sdk_url, av);
     } else {
       b.textContent = mode === "offline" ? "离线演示模式（不消耗积分）" : "文字 + 卡片版";
@@ -372,15 +373,15 @@ function loadSdk(url, av){
           onError(err){ console.warn("星云 Agent:", err); }
         }
       };
-      if (av && av.e2e_server && av.auth_token){
-        opts.e2eServer = av.e2e_server;
-        opts.authToken = av.auth_token;
-      } else if (SESSION.app_id && SESSION.app_secret){
-        // 兼容旧口径（仅本地调试用；公网部署不开放这条）
-        opts.appId = SESSION.app_id; opts.appSecret = SESSION.app_secret;
-        opts.gatewayServer = SESSION.gateway;
+      if (av && av.gateway_proxy){
+        // 密钥不出服务器：gatewayServer 指向我们自己的代理，签名在服务端完成。
+        // 这里的 appId/appSecret 是占位值（SDK 要求非空），真实密钥仅存在于服务端 .env。
+        opts.gatewayServer = location.origin + av.gateway_proxy;
+        opts.appId = "via-server-proxy";
+        opts.appSecret = "via-server-proxy";
+        opts.headers = {"X-Demo-Session": SESSION.session_id};
       } else {
-        bubble("bot", "服务端未下发数字人凭证，已用文字 + 卡片版。");
+        bubble("bot", "服务端未开启数字人演示，已用文字 + 卡片版。");
         return;
       }
       AGENT = new Ctor(opts);
@@ -397,7 +398,23 @@ function loadSdk(url, av){
 }
 
 // 单场限时倒计时 + 离开页面主动释放名额（并发=1，早释放=省钱）
-let AV_TTL_TIMER = null;
+let AV_TTL_TIMER = null, AV_KEEP_TIMER = null;
+// 心跳：每 20 秒一次，服务端 45 秒收不到就认为掉线并主动释放线路
+function startKeepalive(){
+  if (AV_KEEP_TIMER) clearInterval(AV_KEEP_TIMER);
+  const beat = async () => {
+    if (!(SESSION && SESSION.avatar && SESSION.avatar.enabled)) return;
+    try{
+      const r = await (await fetch("/api/avatar/keepalive", {method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: SESSION.session_id})})).json();
+      if (r && r.ok === false) releaseAvatar("server_released");
+    }catch(e){}
+  };
+  beat();
+  AV_KEEP_TIMER = setInterval(beat, 20000);
+}
+function stopKeepalive(){ if (AV_KEEP_TIMER){ clearInterval(AV_KEEP_TIMER); AV_KEEP_TIMER = null; } }
 function startAvatarCountdown(ttl){
   let left = ttl;
   const badge = $("#modeBadge");
@@ -414,6 +431,7 @@ function startAvatarCountdown(ttl){
 
 function releaseAvatar(why){
   if (!(SESSION && SESSION.avatar && SESSION.avatar.enabled)) return;
+  stopKeepalive();
   SESSION.avatar.enabled = false;
   try{
     navigator.sendBeacon("/api/avatar/release",
