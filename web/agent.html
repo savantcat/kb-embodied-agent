@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人工坐席工作台 · KB-Embodied-Agent</title>
+<style>
+:root{--bg:#0e1116;--panel:#161b22;--line:#232a34;--txt:#e6edf3;--dim:#8b949e;--blue:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--red:#ef4444}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0}
+h1 small{color:var(--dim);font-size:12px;font-weight:400;margin-left:8px}
+.grow{flex:1}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;border:1px solid var(--line)}
+.tag.q{color:var(--warn);border-color:#5a4520;background:#241d0f}
+.tag.a{color:var(--ok);border-color:#1d4d2c;background:#0f2417}
+.tag.c{color:var(--dim)}
+.wrap{display:grid;grid-template-columns:340px 1fr;gap:14px;padding:14px 20px}
+@media(max-width:900px){.wrap{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;min-height:520px;overflow:hidden}
+.hd{padding:9px 13px;border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600;display:flex;justify-content:space-between}
+.queue{overflow:auto;flex:1}
+.qitem{padding:10px 13px;border-bottom:1px solid var(--line);cursor:pointer}
+.qitem:hover{background:#1b2230}
+.qitem.sel{background:#12243c;border-left:3px solid var(--blue)}
+.qitem .t{font-size:12.5px}
+.qitem .m{color:var(--dim);font-size:11.5px;margin-top:3px}
+.qitem .q{color:#c9d1d9;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ctx{padding:10px 13px;border-bottom:1px solid var(--line);background:#101720;font-size:12px;color:var(--dim)}
+.ctx b{color:var(--txt)}
+.chat{flex:1;overflow:auto;padding:12px 13px}
+.msg{margin:0 0 8px;padding:8px 11px;border-radius:10px;max-width:78%;white-space:pre-wrap;font-size:13px}
+.msg.customer{background:#2a1416;border:1px solid #4a2226}
+.msg.agent{background:#12243c;border:1px solid #1e3a5f;margin-left:auto}
+.msg.system{background:#1a1f27;color:var(--dim);font-size:11.5px;margin:0 auto;max-width:100%;text-align:center}
+.msg .who{display:block;font-size:11px;opacity:.65;margin-bottom:3px}
+footer{display:flex;gap:8px;padding:10px 13px;border-top:1px solid var(--line)}
+input,textarea{flex:1;background:#0d1218;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 11px;font:13px/1.5 inherit;resize:none}
+button{background:var(--blue);border:0;color:#fff;border-radius:8px;padding:9px 14px;cursor:pointer;font-size:13px}
+button.ghost{background:var(--panel);border:1px solid var(--line);color:var(--txt)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.empty{color:var(--dim);padding:24px;text-align:center;font-size:13px}
+.hint{color:var(--dim);font-size:12px;padding:0 20px 16px}
+kbd{background:#0d1218;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎧 人工坐席工作台<small>AI 转人工的真实落点：工单队列 → 接入 → 双向对话 → 结束会话</small></h1>
+  <div class="grow"></div>
+  <span class="tag" id="stQ">排队 0</span>
+  <span class="tag" id="stA">进行中 0</span>
+  <button class="ghost" id="btnRefresh">↻ 刷新</button>
+  <a href="/" style="color:var(--dim);font-size:12px">← 客户页</a>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="hd">待处理工单 <span id="cnt" style="color:var(--dim)">0</span></div>
+    <div class="queue" id="queue"><div class="empty">暂无工单<br><span style="font-size:12px">在客户页问一个知识库答不上的问题，或在客户页说「帮我转人工」</span></div></div>
+  </div>
+
+  <div class="panel">
+    <div class="hd" id="detailHd">工单详情</div>
+    <div class="ctx" id="ctx">选择左侧工单后可查看客户问题与上下文（转人工时已同步，客户无需重复描述）。</div>
+    <div class="chat" id="chat"><div class="empty">—</div></div>
+    <footer>
+      <input id="say" placeholder="以人工坐席身份回复客户…（回车发送）" disabled>
+      <button id="btnSay" disabled>发送</button>
+      <button class="ghost" id="btnClaim" disabled>接入会话</button>
+      <button class="ghost" id="btnRelease" disabled title="解除接管，把会话交回数字客服（AI 恢复应答）">↩ 转数字客服</button>
+      <button class="ghost" id="btnClose" disabled>⏹ 结束对话</button>
+    </footer>
+  </div>
+</div>
+<div class="hint">提示：客户页每 2 秒轮询消息，坐席台每 3 秒刷新；坐席接入后，客户在客户页输入的内容会直接进到这个工单里（不再走 AI）。</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let CUR = null, SINCE = 0, LAST_TOTAL = 0;
+const esc = s => String(s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+async function loadQueue(){
+  try{
+    const d = await (await fetch("/api/handoff/queue")).json();
+    $("#stQ").textContent = "排队 " + d.queued;
+    $("#stA").textContent = "进行中 " + d.active;
+    $("#cnt").textContent = d.items.length;
+    if (!d.items.length){
+      $("#queue").innerHTML = '<div class="empty">暂无工单<br><span style="font-size:12px">在客户页问一个知识库答不上的问题，或在客户页说「帮我转人工」</span></div>';
+      return;
+    }
+    $("#queue").innerHTML = d.items.map(it => `
+      <div class="qitem ${CUR===it.id?'sel':''}" data-id="${it.id}">
+        <div class="t">#${it.id} <span class="tag ${it.status==='queued'?'q':'a'}">${it.status==='queued'?'待接入':'进行中'}</span>
+          ${it.agent?`<span style="color:var(--dim);font-size:11.5px"> ${esc(it.agent)}</span>`:''}</div>
+        <div class="m">${esc(it.reason)} · ${it.created_at} · 等待 ${it.waiting_seconds}s</div>
+        <div class="q">${esc(it.question)}</div>
+      </div>`).join("");
+    document.querySelectorAll(".qitem").forEach(el => el.onclick = () => openTicket(el.dataset.id));
+  }catch(e){ $("#stQ").textContent = "后端未响应"; }
+}
+
+function renderMsgs(msgs){
+  const box = $("#chat");
+  if (!msgs.length && !box.querySelector(".msg")) box.innerHTML = '<div class="empty">—</div>';
+  msgs.forEach(m => {
+    const d = document.createElement("div");
+    d.className = "msg " + m.role;
+    d.innerHTML = `<span class="who">${m.role==='customer'?'客户':m.role==='agent'?'人工坐席':'系统'} · ${m.ts}</span>${esc(m.text)}`;
+    if (m.role === "system") d.innerHTML = esc(m.text + " · " + m.ts);
+    box.appendChild(d);
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+async function openTicket(tid){
+  CUR = tid; SINCE = 0; LAST_TOTAL = 0;
+  $("#chat").innerHTML = ""; 
+  const d = await (await fetch("/api/handoff/ticket/" + tid)).json();
+  const label = {queued:"待接入", active:"人工接管中", released:"已交回数字客服", closed:"已结束"}[d.status] || d.status;
+  $("#detailHd").innerHTML = `工单 #${d.id} <span class="tag ${d.status==='queued'?'q':'a'}">${label}</span>${d.agent?` <span style="color:var(--dim);font-size:12px">${esc(d.agent)}</span>`:''}`;
+  const c = (d.history && d.history.length) ? d.history : [];
+  $("#ctx").innerHTML = `<b>客户问题：</b>${esc(d.question)}<br><b>转接原因：</b>${esc(d.reason)}<br>
+    <b>命中依据：</b>${(d.sources||[]).length ? (d.sources||[]).map(esc).join(" · ") : "（无）"}<br>
+    <b>上下文：</b>${c.length ? esc(JSON.stringify(c).slice(0,220)) : "（转人工时已带上问题与历史）"}`;
+  $("#say").disabled = d.status === "closed";
+  $("#btnSay").disabled = d.status === "closed";
+  $("#btnClaim").disabled = d.status !== "queued";
+  $("#btnClose").disabled = (d.status === "closed");
+  $("#btnRelease").disabled = (d.status !== "active");
+  renderMsgs(d.messages || []);
+  SINCE = (d.messages || []).length; LAST_TOTAL = SINCE;
+  loadQueue();
+}
+
+async function poll(){
+  if (CUR){
+    try{
+      const d = await (await fetch(`/api/handoff/messages?ticket=${CUR}&since=${SINCE}`)).json();
+      if ((d.messages||[]).length){ renderMsgs(d.messages); SINCE = d.total; }
+      if (d.total !== LAST_TOTAL){
+        LAST_TOTAL = d.total;
+        if (d.status === "active"){ $("#btnClaim").disabled = true; $("#say").disabled = false; $("#btnSay").disabled = false; }
+        if (d.status === "closed"){ $("#say").disabled = true; $("#btnSay").disabled = true; $("#btnClose").disabled = true; }
+      }
+    }catch(e){}
+  }
+  loadQueue();
+}
+
+$("#btnRefresh").onclick = loadQueue;
+$("#btnClaim").onclick = async () => {
+  if (!CUR) return;
+  await fetch("/api/handoff/claim", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ticket: CUR, agent: "坐席A"})});
+  await openTicket(CUR);
+};
+$("#btnSay").onclick = sendSay;
+async function sendSay(){
+  const t = $("#say").value.trim();
+  if (!t || !CUR) return;
+  $("#say").value = "";
+  await fetch("/api/handoff/say", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ticket: CUR, text: t, role: "agent"})});
+  await poll();
+}
+$("#say").addEventListener("keydown", e => { if (e.key === "Enter") sendSay(); });
+$("#btnRelease").onclick = async () => {
+  if (!CUR) return;
+  await fetch("/api/handoff/release", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ticket: CUR, note: "坐席交回数字客服"})});
+  await openTicket(CUR);
+};
+$("#btnClose").onclick = async () => {
+  if (!CUR) return;
+  await fetch("/api/handoff/close", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ticket: CUR, note: "坐席已处理"})});
+  await openTicket(CUR);
+};
+
+loadQueue();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>

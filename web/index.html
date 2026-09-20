@@ -90,6 +90,8 @@
   @media (max-width:820px){ main{grid-template-columns:1fr;height:auto} section.stage{border-right:0;border-bottom:1px solid var(--line)} }
 
 /* —— 具身状态看板 / 弱网演练 / 适老化 —— */
+.humanbanner{display:none;margin:8px 0 0;padding:9px 12px;border:1px solid #1e3a5f;background:#0f1c2e;color:#93c5fd;border-radius:8px;font-size:12.5px}
+.humanbanner.on{display:block}
 .netbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #5a4520;background:#241d0f;color:#f59e0b;border-radius:8px;font-size:12.5px}
 .embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden}
 .embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
@@ -104,6 +106,7 @@ body.a11y .subtitle{font-size:17px;background:#000;color:#fff;border-color:#fff}
 body.a11y .msg{font-size:17px;line-height:1.9}
 body.a11y .quick button{font-size:15px;padding:9px 13px}
 body.a11y :root{--dim:#c9d1d9}
+.msg.human{border-left:3px solid #22c55e;background:#0f2417}
 </style>
 </head>
 <body>
@@ -112,6 +115,7 @@ body.a11y :root{--dim:#c9d1d9}
   <span class="sub">企业知识库具身客服 · 演示（2026 上海开源软件应用创新大赛参赛作品）</span>
   <span class="badge" id="modeBadge">连接中…</span>
   <span class="badge" id="memBadge" title="会话记忆：多轮上下文 + 个性化档案">🧠 记忆 0 轮</span>
+  <a href="/agent.html" style="background:#166534;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px;margin-right:6px">🎧 人工坐席台</a>
   <a href="/audit.html" style="background:#7c2d12;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px">🛡️ 合规红队测试台</a>
 </header>
 
@@ -142,6 +146,7 @@ body.a11y :root{--dim:#c9d1d9}
       <button class="ghost" id="btnNet" title="模拟弱网/断网：数字人降级、恢复后自动重连">🌐 弱网演练</button>
       <button class="danger" id="btnKill">⛔ 一键停</button>
     </div>
+    <div class="humanbanner" id="humanBanner"></div>
     <div class="netbanner" id="netBanner">🌐 弱网演练中：数字人已降级为文字 + 卡片版；网络恢复后自动重连</div>
     <!-- 具身状态看板：六类具身能力与对话事件的实时绑定（证明不是「文本框 + 形象」） -->
     <div class="embody">
@@ -260,6 +265,12 @@ function card(w){
     const ul = document.createElement("ul");
     const rows = [["转接原因", p.reason], ["目标队列", p.queue]];
     rows.forEach(([k, v]) => { if (v){ const li = document.createElement("li"); li.textContent = k + "：" + v; ul.appendChild(li); } });
+    if (p.ticket && p.ticket.id){
+      const li = document.createElement("li");
+      li.innerHTML = "工单号：<b>" + p.ticket.id + "</b>（<span class='tkstate'>排队中</span>）";
+      ul.appendChild(li);
+      startHandoffPoll(p.ticket.id, el.querySelector(".tkstate"));
+    }
     el.appendChild(ul);
   } else {
     const pre = document.createElement("pre"); pre.style.margin = "0";
@@ -269,6 +280,66 @@ function card(w){
   $("#log").appendChild(el);
   $("#log").scrollTop = $("#log").scrollHeight;
 }
+// ================= 真转人工：客户侧轮询工单消息 + 可回复 =================
+let HANDOFF = null;
+function startHandoffPoll(tid, stateEl){
+  if (HANDOFF && HANDOFF.id === tid) return;
+  HANDOFF = {id: tid, since: 0, stateEl: stateEl, timer: null, status: "queued", agent: ""};
+  let lastMsg = "";
+  const tick = async () => {
+    if (!HANDOFF || HANDOFF.id !== tid) return;
+    try{
+      const d = await (await fetch("/api/handoff/messages?ticket=" + tid + "&since=" + HANDOFF.since)).json();
+      if (d.messages && d.messages.length){
+        d.messages.forEach(m => {
+          const key = m.ts + "|" + m.role + "|" + m.text;
+          if (key === lastMsg) return;
+          lastMsg = key;
+          if (m.role === "customer") return;              // 自己的话已显示
+          if (m.role === "system"){
+            if (stateEl) stateEl.textContent = m.text;
+            bubble("bot", m.text, "工单 " + tid);
+            emb("Action", "人工坐席事件：" + m.text);
+          } else {
+            bubble("human", m.text, "🎧 人工坐席 " + (d.agent || "") + " · " + m.ts);
+            say(m.text);
+          }
+        });
+        HANDOFF.since = d.total;
+      }
+      HANDOFF.status = d.status; HANDOFF.agent = d.agent || "";
+      // 客户页明确呈现"人工接管 / 交回数字客服"的状态切换
+      const hb = document.getElementById("humanBanner");
+      if (d.status === "queued"){ hb.className = "humanbanner on"; hb.textContent = "⏳ 正在为您转接人工坐席…（AI 仍在待命）"; }
+      else if (d.status === "active"){ hb.className = "humanbanner on"; hb.textContent = "🎧 人工坐席" + (d.agent ? " " + d.agent : "") + "已接管，AI 已暂停应答（数字人对话已断开）"; }
+      else if (d.status === "released"){
+        hb.className = "humanbanner"; HANDOFF = null;
+        bubble("bot", "人工坐席已将您转回数字客服，AI 恢复应答。", "工单 " + tid);
+        return;
+      }
+      else if (d.status === "closed"){
+        hb.className = "humanbanner"; HANDOFF = null;
+        bubble("bot", "人工服务已结束，感谢您的耐心等待。", "工单 " + tid);
+        return;
+      }
+      if (stateEl && d.status === "queued") stateEl.textContent = "排队中（等待坐席接入）";
+      else if (stateEl && d.status === "active") stateEl.textContent = "人工坐席" + (d.agent ? " " + d.agent : "") + "已接入";
+      else if (stateEl && d.status === "released") stateEl.textContent = "已交回数字客服";
+      else if (stateEl && d.status === "closed") stateEl.textContent = "会话已结束";
+    }catch(e){}
+    if (HANDOFF && HANDOFF.id === tid) HANDOFF.timer = setTimeout(tick, 2000);
+  };
+  tick();
+}
+async function handoffSay(text){
+  if (!HANDOFF) return false;
+  try{
+    await fetch("/api/handoff/say", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ticket: HANDOFF.id, text: text, role: "customer"})});
+    return true;
+  }catch(e){ return false; }
+}
+
 function speak(text){
   if (!SPEAK || !window.speechSynthesis) return;
   try { const u = new SpeechSynthesisUtterance(text); u.lang = "zh-CN"; u.rate = 1.05; speechSynthesis.speak(u); } catch(e){}
@@ -654,6 +725,13 @@ function doInterrupt(){
 async function send(text){
   text = (text || $("#input").value).trim();
   if (!text || BUSY) return;
+  // 已转人工：这一句直接发给坐席（真人工会话），不再走 AI
+  if (HANDOFF && (HANDOFF.status === "active" || HANDOFF.status === "closed")){
+    $("#input").value = "";
+    bubble("me", text);
+    await handoffSay(text);
+    return;
+  }
   BUSY = true; $("#input").value = ""; $("#send").disabled = true;
   bubble("me", text);
   setState("Listen", ["Listen"]);

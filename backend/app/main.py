@@ -132,7 +132,8 @@ AVATAR_DAILY_POINTS = float(os.getenv("AVATAR_DAILY_POINTS", "60"))
 IP_DAILY_SESSIONS = int(os.getenv("IP_DAILY_SESSIONS", "2"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
-AVATAR = {"enabled": False, "since": None, "reason": "默认关闭（后台开关控制）"}
+AVATAR = {"enabled": os.getenv("AVATAR_DEFAULT", "off").strip().lower() in ("on", "1", "true", "yes"),
+          "since": None, "reason": "默认状态由 AVATAR_DEFAULT 决定"}
 AVATAR_CONCURRENCY = int(os.getenv("AVATAR_CONCURRENCY", "3"))   # 并发路数（魔珐线路放开后调此值即可）
 SLOTS: dict[str, dict] = {}          # sid -> {"until": 时长, "start": 起始, "xsid": 平台会话号}
 DAY = {"day": "", "sessions": 0, "seconds": 0.0}
@@ -526,6 +527,161 @@ async def redteam_run_all(save: bool = True) -> dict:
             "results": results, "markdown": md}
 
 
+# ---------------------------------------------------------------- 真转人工（人工坐席协同）
+# 转人工不是"出一张卡就完了"：这里落真实工单，坐席工作台可接入、可对话，客户页双向可见。
+TICKETS: dict = {}          # tid -> {..., status: queued|active|released|closed, messages: [...]}
+TAKEOVER: dict = {}         # session_id -> tid：人工接管期间，AI 暂停应答（真·人工接管）
+
+
+def create_ticket(session_id: str, reason: str, question: str,
+                  sources: list | None = None, history: list | None = None,
+                  summary: str = "") -> dict:
+    tid = "T" + time.strftime("%m%d%H%M%S") + str(len(TICKETS) % 100).zfill(2)
+    tk = {
+        "id": tid, "session_id": session_id, "reason": reason, "question": question,
+        "sources": sources or [], "history": history or [], "summary": summary,
+        "status": "queued", "agent": "", "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "claimed_at": None, "closed_at": None,
+        "messages": [{"role": "customer", "text": question,
+                      "ts": time.strftime("%H:%M:%S")}],
+    }
+    TICKETS[tid] = tk
+    record_audit({"kind": "handoff-ticket", "ticket": tid, "reason": reason,
+                  "session_id": session_id, "status": "queued"})
+    return tk
+
+
+def _public_ticket(tk: dict) -> dict:
+    d = dict(tk)
+    d["waiting_seconds"] = int(time.time() - time.mktime(time.strptime(tk["created_at"], "%Y-%m-%d %H:%M:%S")))
+    return d
+
+
+class TicketIn(BaseModel):
+    session_id: str = ""
+    reason: str = "客户主动要求"
+    question: str = ""
+    sources: list = []
+    history: list = []
+    summary: str = ""
+
+
+@app.post("/api/handoff/ticket")
+def handoff_ticket(body: TicketIn) -> dict:
+    """登记转人工工单（前端提交转人工请求时调用；服务端也会在命中转人工规则时自动建单）。"""
+    return _public_ticket(create_ticket(body.session_id, body.reason, body.question,
+                                        body.sources, body.history, body.summary))
+
+
+@app.get("/api/handoff/queue")
+def handoff_queue() -> dict:
+    """坐席工作台：待接入 + 进行中的工单列表。"""
+    items = [ _public_ticket(v) for v in TICKETS.values() if v["status"] != "closed" ]
+    items.sort(key=lambda x: (x["status"] != "queued", x["created_at"]))
+    return {"queued": sum(1 for i in items if i["status"] == "queued"),
+            "active": sum(1 for i in items if i["status"] == "active"),
+            "items": items}
+
+
+class ClaimIn(BaseModel):
+    ticket: str
+    agent: str = "坐席A"
+
+
+@app.post("/api/handoff/claim")
+def handoff_claim(body: ClaimIn) -> dict:
+    """坐席接入会话：客户侧会立刻看到「人工坐席已接入」。"""
+    tk = TICKETS.get(body.ticket)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    tk["status"] = "active"
+    tk["agent"] = body.agent
+    tk["claimed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    tk["messages"].append({"role": "system", "text": f"{body.agent} 已接入会话，已由人工接管（数字人对话已暂停）",
+                           "ts": time.strftime("%H:%M:%S")})
+    TAKEOVER[tk["session_id"]] = tk["id"]      # 接管登记：期间 AI 不再应答
+    record_audit({"kind": "handoff-claim", "ticket": tk["id"], "agent": body.agent})
+    return _public_ticket(tk)
+
+
+class SayIn(BaseModel):
+    ticket: str
+    text: str
+    role: str = "agent"        # agent（坐席）/ customer（客户）
+
+
+@app.post("/api/handoff/say")
+def handoff_say(body: SayIn) -> dict:
+    """工单内发言（坐席或客户），双方通过 /api/handoff/messages 轮询获取。"""
+    tk = TICKETS.get(body.ticket)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    txt = (body.text or "").strip()
+    if not txt:
+        raise HTTPException(400, "text 不能为空")
+    tk["messages"].append({"role": body.role, "text": txt, "ts": time.strftime("%H:%M:%S")})
+    if body.role == "agent" and tk["status"] == "queued":
+        tk["status"], tk["agent"] = "active", tk.get("agent") or "坐席A"
+    record_audit({"kind": "handoff-msg", "ticket": tk["id"], "role": body.role, "text": txt[:40]})
+    return _public_ticket(tk)
+
+
+@app.get("/api/handoff/messages")
+def handoff_messages(ticket: str, since: int = 0) -> dict:
+    """轮询工单消息（客户页每 2 秒、坐席台每 3 秒）。since 为已取到的消息条数。"""
+    tk = TICKETS.get(ticket)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    return {"id": tk["id"], "status": tk["status"], "agent": tk["agent"],
+            "total": len(tk["messages"]), "messages": tk["messages"][since:]}
+
+
+class CloseIn(BaseModel):
+    ticket: str
+    note: str = ""
+
+
+class ReleaseIn(BaseModel):
+    ticket: str
+    note: str = ""
+
+
+@app.post("/api/handoff/release")
+def handoff_release(body: ReleaseIn) -> dict:
+    """坐席把会话交回数字客服：解除接管，AI 恢复应答。"""
+    tk = TICKETS.get(body.ticket)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    tk["status"] = "released"
+    tk["messages"].append({"role": "system", "text": "已转回数字客服，AI 恢复应答",
+                           "ts": time.strftime("%H:%M:%S")})
+    TAKEOVER.pop(tk["session_id"], None)
+    record_audit({"kind": "handoff-release", "ticket": tk["id"], "note": body.note})
+    return _public_ticket(tk)
+
+
+@app.post("/api/handoff/close")
+def handoff_close(body: CloseIn) -> dict:
+    tk = TICKETS.get(body.ticket)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    tk["status"] = "closed"
+    tk["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    TAKEOVER.pop(tk["session_id"], None)
+    tk["messages"].append({"role": "system", "text": "会话已结束" + (f"（{body.note}）" if body.note else ""),
+                           "ts": time.strftime("%H:%M:%S")})
+    record_audit({"kind": "handoff-close", "ticket": tk["id"], "note": body.note})
+    return _public_ticket(tk)
+
+
+@app.get("/api/handoff/ticket/{tid}")
+def handoff_detail(tid: str) -> dict:
+    tk = TICKETS.get(tid)
+    if not tk:
+        raise HTTPException(404, "工单不存在")
+    return _public_ticket(tk)
+
+
 class ReportIn(BaseModel):
     results: list[dict]
 
@@ -903,6 +1059,19 @@ async def chat(body: ChatIn) -> dict:
     if DEMO_MODE == "offline":
         return _offline_reply(text)
 
+    # 人工接管中：AI 暂停应答，请求直接落到人工工单（客户页会看到"人工接管中"）
+    tid_now = TAKEOVER.get(body.session_id)
+    if tid_now and DEMO_MODE != "offline":
+        tk = TICKETS.get(tid_now)
+        record_audit({"kind": "chat", "text": text, "takeover": tid_now, "handoff": True})
+        return {
+            "text": "当前已由人工坐席接管，AI 已暂停应答。您的话已经转给坐席，请稍候。",
+            "sources": [], "widgets": [], "state": ["Listen"],
+            "mode": "takeover",
+            "handoff": {"ticket": tid_now, "agent": (tk or {}).get("agent", "")},
+            "logged": True,
+        }
+
     # 一键停：AI 已停用 → 一律转人工，不再作答
     if KILL["stopped"]:
         w = call_tool("handoff.human", {"reason": "AI 已人工停用（" + (KILL["reason"] or "人工接管") + "）",
@@ -910,6 +1079,8 @@ async def chat(body: ChatIn) -> dict:
                                         "question": text, "sources": [],
                                         "history": [{"role": "customer", "text": text}],
                                         "summary": "客户在本轮提问，AI 已停用，直接转人工"})
+        tk = create_ticket(body.session_id, "AI 已停用（一键停）", text, [], [], "停用期间直接转人工")
+        w.payload["ticket"] = {"id": tk["id"], "status": tk["status"]}
         record_audit({"kind": "chat", "text": text, "stopped": True, "handoff": True})
         return {
             "text": "AI 已停用，正在为您转接人工坐席，请稍等。",
@@ -992,6 +1163,15 @@ async def chat(body: ChatIn) -> dict:
             handoff = True
     else:
         handoff = any(w.type == "handoff" for w in widgets)
+
+    # 命中转人工 → 落真实工单（坐席台可接入、可对话），工单号回填到交接卡
+    for w in widgets:
+        if w.type == "handoff":
+            tk = create_ticket(body.session_id, str(w.payload.get("reason") or "转人工"),
+                               text, [x for x in (w.payload.get("context") or {}).get("sources") or []],
+                               w.payload.get("context", {}).get("history") or [],
+                               str(w.payload.get("summary") or ""))
+            w.payload["ticket"] = {"id": tk["id"], "status": tk["status"]}
 
     _remember(body.session_id, "user", text)
     _remember(body.session_id, "assistant", answer)
