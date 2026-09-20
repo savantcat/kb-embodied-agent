@@ -19,14 +19,22 @@
   .badge{margin-left:auto;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
   .badge.online{color:var(--ok);border-color:#1c6f52}
   .badge.offline{color:var(--warn);border-color:#7a5a12}
+  .badge.text{color:#8fb0ff;border-color:#33507a}
   main{display:grid;grid-template-columns:minmax(280px,42%) 1fr;gap:0;height:calc(100vh - 57px)}
   section.stage{border-right:1px solid var(--line);padding:18px;display:flex;flex-direction:column;gap:12px;
                 background:radial-gradient(120% 80% at 50% 0%,#16204a 0%,#0b1020 70%)}
-  .avatar{position:relative;aspect-ratio:1/1;max-width:300px;margin:6px auto 0;border-radius:50%;
+  /* 画面区：默认「圆脸占位」；数字人上线后切到大画面（16:9 或 9:16），可全屏 */
+  .avatar{position:relative;margin:6px auto 0;border-radius:14px;overflow:hidden;
           background:conic-gradient(from 0deg,#22305e,#3b56a8,#22305e);display:grid;place-items:center;
           box-shadow:0 0 0 1px var(--line), 0 18px 50px rgba(0,0,0,.5)}
+  .avatar.round{aspect-ratio:1/1;max-width:300px;border-radius:50%}
+  .avatar.landscape{aspect-ratio:16/9;width:100%;max-width:none;min-height:min(46vh,420px)}
+  .avatar.portrait{aspect-ratio:9/16;width:auto;max-width:min(46vh,420px);min-height:min(56vh,520px)}
+  .avatar:fullscreen,.avatar:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;aspect-ratio:auto}
   .avatar .face{width:64%;height:64%;border-radius:50%;background:linear-gradient(180deg,#2a3768,#1b2450);
                 display:grid;place-items:center;color:var(--dim);font-size:13px;text-align:center;padding:8px}
+  .viewbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .viewbar span.hint{font-size:11px;color:var(--dim)}
   .avatar[data-state="Speak"]{animation:speak 1.2s ease-in-out infinite}
   .avatar[data-state="Listen"]{animation:listen 2.4s ease-in-out infinite}
   .avatar[data-state="Think"]{animation:think 1.6s ease-in-out infinite}
@@ -91,9 +99,14 @@
 
 <main>
   <section class="stage">
-    <div class="avatar" id="avatar" data-state="Listen">
-      <div id="avatar-stage" style="width:100%;height:100%;min-height:240px"></div>
+    <div class="avatar round" id="avatar" data-state="Listen">
+      <div id="avatar-stage" style="width:100%;height:100%"></div>
       <div class="face" id="face">虚拟形象<br><span style="font-size:11px">（离线演示：不使用星云实时驱动）</span></div>
+    </div>
+    <div class="viewbar">
+      <button class="ghost" id="btnFull">⛶ 全屏</button>
+      <button class="ghost" id="btnOrient">⇄ 横屏 / 竖屏</button>
+      <span class="hint" id="viewHint">画面区：数字人上线后可全屏、可切横竖屏</span>
     </div>
     <div class="states" id="states">
       <span class="chip" data-s="Listen">聆听 Listen</span>
@@ -273,6 +286,7 @@ function initTrustUI(){
 
 async function init(){
   initTrustUI();
+  initViewUI();
   QUICK.forEach(q => {
     const b = document.createElement("button");
     b.className = "ghost"; b.textContent = q;
@@ -281,14 +295,25 @@ async function init(){
   });
   try{
     SESSION = await (await fetch("/api/session", {method:"POST"})).json();
-    const online = SESSION.mode === "online";
+    const mode = SESSION.mode;                 // offline | text | online
+    const av = SESSION.avatar || {};
     const b = $("#modeBadge");
-    b.textContent = online ? "在线模式（星云实时驱动）" : "离线演示模式（不消耗积分）";
-    b.className = "badge " + (online ? "online" : "offline");
-    bubble("bot", online ? "在线模式已就绪，可以开始对话。" : "离线演示模式已就绪：不走星云实时驱动，效果与链路与在线一致。",
-           "会话 " + SESSION.session_id);
-    // 在线模式：只有后端下发了 SDK 地址才加载（前端永不持有 appSecret）
-    if (online && SESSION.sdk_url) loadSdk(SESSION.sdk_url);
+    if (mode === "online" && av.enabled){
+      b.textContent = "数字人演示（限时开放）";
+      b.className = "badge online";
+      bubble("bot", "数字人演示已开启，本场限时 " + Math.round((av.ttl || 180) / 60) +
+             " 分钟。会话由服务端代建，浏览器只持有一次性凭证。");
+      startAvatarCountdown(av.ttl || 180);
+      loadSdk(SESSION.sdk_url, av);
+    } else {
+      b.textContent = mode === "offline" ? "离线演示模式（不消耗积分）" : "文字 + 卡片版";
+      b.className = "badge " + (mode === "offline" ? "offline" : "text");
+      $("#face").innerHTML = "数字人演示未开放<br><span style='font-size:11px'>文字 + 卡片版照常可用</span>";
+      bubble("bot", mode === "offline"
+        ? "离线演示模式已就绪：不走星云实时驱动，效果与链路与在线一致。"
+        : "已就绪：文字问答 + 卡片交付可用。" + (av.reason ? "数字人演示：" + av.reason + "。" : ""),
+        "会话 " + SESSION.session_id);
+    }
   }catch(e){
     $("#modeBadge").textContent = "后端未响应";
     bubble("bot", "连不上后端（/api/session 失败）。请确认 docker compose 或本地后端已启动。");
@@ -310,43 +335,117 @@ function mapSdkState(st){
   return "Listen";
 }
 
-function loadSdk(url){
+function loadSdk(url, av){
   const s = document.createElement("script");
   s.src = url;
-  s.onerror = () => { $("#face").innerHTML = "星云 SDK 加载失败<br><span style='font-size:11px'>已回退为离线表现</span>"; };
+  s.onerror = () => { $("#face").innerHTML = "星云 SDK 加载失败<br><span style='font-size:11px'>已回退为文字 + 卡片版</span>"; };
   s.onload = async () => {
     const Ctor = window.XingyunAvatarAgent || window.XmovAvatar;
     if (!Ctor){
-      $("#face").innerHTML = "SDK 已加载但未暴露构造器<br><span style='font-size:11px'>已回退为离线表现</span>";
+      $("#face").innerHTML = "SDK 已加载但未暴露构造器<br><span style='font-size:11px'>已回退为文字 + 卡片版</span>";
       return;
     }
     try{
-      AGENT = new Ctor({
+      const opts = {
         containerId: "#avatar-stage",
-        appId: SESSION.app_id,
-        appSecret: SESSION.app_secret,
-        gatewayServer: SESSION.gateway,
-        // 关键：我方接管"想"这一环 —— 不给 SDK 传 brain_config（官方规定：要么不传、
-        // 要么给完整 LLM 配置，传半截会被平台判 422），只调用 speak() 播报我方 Agent 的答案，
-        // 因此 SDK 内置大脑永远不会被触发（不调用 ask()）。
-        // 若需在平台侧彻底关闭 ASR/Brain，按官方要求到「星云平台 → 应用管理」配置。
+        // 关键：不传 appId/appSecret —— 会话由服务端代建，浏览器只拿一次性 e2e 地址 + token
+        // （SDK 规定两者必须成对传入；appSecret 永不出服务器，公网可安全开放）
         onStateChange(st){ setState(mapSdkState(st)); },
         onVoiceStateChange(st){
           if (st === "start") setState("Speak");
           else if (st === "end") setState("Listen");
         },
         onMessage(err){ console.warn("星云 SDK:", err); }
-      });
+      };
+      if (av && av.e2e_server && av.auth_token){
+        opts.e2eServer = av.e2e_server;
+        opts.authToken = av.auth_token;
+      } else if (SESSION.app_id && SESSION.app_secret){
+        // 兼容旧口径（仅本地调试用；公网部署不开放这条）
+        opts.appId = SESSION.app_id; opts.appSecret = SESSION.app_secret;
+        opts.gatewayServer = SESSION.gateway;
+      } else {
+        bubble("bot", "服务端未下发数字人凭证，已用文字 + 卡片版。");
+        return;
+      }
+      AGENT = new Ctor(opts);
       if (typeof AGENT.init === "function") await AGENT.init();
       $("#face").style.display = "none";
-      $("#subtitle").textContent = "在线模式：星云实时驱动已连接，说句话或输入问题试试。";
-      bubble("bot", "在线链路已就绪（表达层=星云实时驱动，大脑=我方 Agent + 企业知识库）。");
+      setAvatarView("landscape");            // 档1：上线即切大画面（16:9），可全屏
+      bubble("bot", "数字人已就绪：表达层=星云实时驱动（厂商），大脑与工具=我方自研。");
     }catch(e){
       AGENT = null;
-      bubble("bot", "星云 SDK 初始化失败：" + ((e && e.message) || e) + "（已回退离线表现）");
+      bubble("bot", "星云 SDK 初始化失败：" + ((e && e.message) || e) + "（已回退文字 + 卡片版）");
     }
   };
   document.head.appendChild(s);
+}
+
+// 单场限时倒计时 + 离开页面主动释放名额（并发=1，早释放=省钱）
+let AV_TTL_TIMER = null;
+function startAvatarCountdown(ttl){
+  let left = ttl;
+  const badge = $("#modeBadge");
+  if (AV_TTL_TIMER) clearInterval(AV_TTL_TIMER);
+  AV_TTL_TIMER = setInterval(() => {
+    left -= 1;
+    badge.textContent = "数字人演示（剩余 " + Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") + "）";
+    if (left <= 0){
+      clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null;
+      releaseAvatar("ttl");
+    }
+  }, 1000);
+}
+
+function releaseAvatar(why){
+  if (!(SESSION && SESSION.avatar && SESSION.avatar.enabled)) return;
+  SESSION.avatar.enabled = false;
+  try{
+    navigator.sendBeacon("/api/avatar/release",
+      new Blob([JSON.stringify({session_id: SESSION.session_id})], {type: "application/json"}));
+  }catch(e){}
+  try{ if (AGENT && AGENT.destroy) AGENT.destroy(why || "released"); }catch(e){}
+  AGENT = null;
+  $("#face").style.display = "";
+  $("#avatar").className = "avatar round";   // 回到占位外观
+  $("#face").innerHTML = "本场演示已结束<br><span style='font-size:11px'>文字 + 卡片版照常可用</span>";
+  $("#modeBadge").textContent = "文字 + 卡片版";
+  $("#modeBadge").className = "badge text";
+  bubble("bot", "本场数字人演示已结束（名额已释放）。文字问答 + 卡片交付继续可用。");
+}
+window.addEventListener("beforeunload", () => releaseAvatar("unload"));
+
+// ---------------------------------------------------------------- 画面区：放大 / 全屏 / 横竖屏
+let AV_ORIENT = "landscape";
+function setAvatarView(orient){
+  const box = $("#avatar");
+  if (!box) return;
+  AV_ORIENT = orient || AV_ORIENT;
+  box.className = "avatar " + AV_ORIENT;
+  const hint = $("#viewHint");
+  if (hint) hint.textContent = "画面区：" + (AV_ORIENT === "landscape" ? "16:9 大屏" : "9:16 竖屏") +
+                               "（可全屏；切换后若画面未自动重排，按 F5 刷新即可）";
+  // SDK 若提供重排接口则调用，保证画布跟随容器变化
+  try{
+    if (AGENT && typeof AGENT.resize === "function") AGENT.resize();
+    else if (AGENT && typeof AGENT.setLayout === "function") AGENT.setLayout({ orientation: AV_ORIENT });
+  }catch(e){}
+}
+function initViewUI(){
+  const full = $("#btnFull"), orient = $("#btnOrient");
+  if (!full || !orient) return;
+  full.onclick = async () => {
+    const box = $("#avatar");
+    try{
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await box.requestFullscreen();
+      setTimeout(() => { try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){} }, 300);
+    }catch(e){ bubble("bot", "全屏被浏览器拒绝（" + ((e && e.message) || e) + "），可直接放大浏览器窗口。"); }
+  };
+  orient.onclick = () => { setAvatarView(AV_ORIENT === "landscape" ? "portrait" : "landscape"); };
+  document.addEventListener("fullscreenchange", () => {
+    try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){}
+  });
 }
 
 // 播报：在线走星云实时驱动，离线回退浏览器语音
