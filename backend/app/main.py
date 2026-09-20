@@ -438,11 +438,19 @@ class JudgeIn(BaseModel):
 def redteam_judge(body: JudgeIn) -> dict:
     """对一条用例的逐轮记录做客观判定（是否转人工/带上下文/有依据/有留痕）。"""
     # 「留痕」不采信前端自述：直接读服务端审计文件，核对客户问题是否真的写进去了
-    audit_txt = ""
+    # 注意：① 审计文件是 JSONL 且中文可能被转义，必须逐行解析后比对，不能用原始串搜索；
+    #      ② 必须复用 record_audit 的同一个 LOG_PATH —— 容器内路径解析与宿主机不同
+    #         （早期用相对路径 logs/audit.jsonl 在容器里读不到，导致 R11 误判不达标）。
+    logged_texts: list[str] = []
     try:
-        ap = Path(os.getenv("AUDIT_PATH", "logs/audit.jsonl"))
+        ap = Path(os.getenv("AUDIT_PATH") or LOG_PATH)
         if ap.exists():
-            audit_txt = ap.read_text(encoding="utf-8", errors="ignore")
+            for line in ap.read_text(encoding="utf-8", errors="ignore").splitlines():
+                try:
+                    rec = json.loads(line)
+                    logged_texts.append(str(rec.get("text") or ""))
+                except Exception:
+                    continue
     except Exception:
         pass
     for i, tn in enumerate(body.turns):
@@ -453,7 +461,7 @@ def redteam_judge(body: JudgeIn) -> dict:
             if body.turns[j].get("role") == "customer":
                 q = str(body.turns[j].get("text") or "")
                 break
-        tn["logged"] = bool(q and q[:12] in audit_txt)
+        tn["logged"] = bool(q and any(q[:12] in x for x in logged_texts))
     out = rt.judge(body.case_id, body.turns)
     record_audit({"kind": "redteam-case", "case_id": body.case_id, "pass": out.get("pass"),
                   "checks": [c["name"] for c in out.get("checks", []) if not c["ok"]]})
@@ -478,6 +486,44 @@ async def redteam_kill_test(body: KillTestIn) -> dict:
              {"role": "agent", "text": r.get("text", ""), "widgets": r.get("widgets", []),
               "sources": r.get("sources", []), "logged": r.get("logged", True)}]
     return {"turns": turns, "mode": r.get("mode")}
+
+
+@app.post("/api/redteam/run-all")
+async def redteam_run_all(save: bool = True) -> dict:
+    """无人值守全量回归：服务端把 12 条用例全部跑完并出报告（不依赖浏览器）。
+
+    用途：CI / 评委复现 —— `curl -X POST http://localhost:8080/api/redteam/run-all`。
+    前端双数字人页面只是"可视化跑法"，判定逻辑与这里完全同源。
+    """
+    results: list[dict] = []
+    for c in rt.CASES:
+        sid = f"rt-{c['id']}-{int(time.time() * 1000)}"
+        turns: list[dict] = []
+        if (c.get("expect") or {}).get("kill_switch"):
+            d = await redteam_kill_test(KillTestIn(case_id=c["id"], text=c["customer"][0]))
+            turns = d["turns"]
+        else:
+            for line in c["customer"]:
+                r = await chat(ChatIn(text=line, session_id=sid))
+                turns.append({"role": "customer", "text": line})
+                turns.append({"role": "agent", "text": r.get("text", ""),
+                              "widgets": r.get("widgets", []), "sources": r.get("sources", [])})
+        j = redteam_judge(JudgeIn(case_id=c["id"], turns=turns))
+        results.append(j)
+    md = rt.report(results)
+    if save:
+        try:
+            outp = Path("docs/合规红队测试报告.md")
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            outp.write_text(md, encoding="utf-8")
+        except Exception:
+            pass
+    passed = sum(1 for r in results if r.get("pass"))
+    veto = [r for r in results if "一票项" in (r.get("caliber") or "")]
+    record_audit({"kind": "redteam-run-all", "total": len(results), "passed": passed})
+    return {"total": len(results), "passed": passed,
+            "veto_passed": sum(1 for r in veto if r.get("pass")), "veto_total": len(veto),
+            "results": results, "markdown": md}
 
 
 class ReportIn(BaseModel):
