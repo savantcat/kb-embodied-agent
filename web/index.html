@@ -118,6 +118,8 @@
       <button class="ghost" id="btnSelfcheck">🩺 国标体检</button>
       <button class="ghost" id="btnKbAudit">🗂 知识库体检</button>
       <button class="ghost" id="btnAudit">🧾 操作留痕</button>
+      <button class="ghost" id="btnMic">🎤 语音输入</button>
+      <button class="ghost" id="btnStop">✋ 打断</button>
       <button class="danger" id="btnKill">⛔ 一键停</button>
     </div>
     <div class="tools" id="tools">可用工具（行动层）：加载中…</div>
@@ -280,6 +282,8 @@ function initTrustUI(){
   $("#btnKbAudit").onclick = runKbAudit;
   $("#btnAudit").onclick = runAuditLog;
   $("#btnKill").onclick = toggleKill;
+  if ($("#btnMic")) $("#btnMic").onclick = toggleMic;
+  if ($("#btnStop")) $("#btnStop").onclick = doInterrupt;
 }
 
 // ---------------------------------------------------------------- 启动
@@ -355,7 +359,18 @@ function loadSdk(url, av){
           if (st === "start") setState("Speak");
           else if (st === "end") setState("Listen");
         },
-        onMessage(err){ console.warn("星云 SDK:", err); }
+        onMessage(err){ console.warn("星云 SDK:", err); },
+        // 功能开关：ASR 识别结果不自动送平台大脑 —— 交回我方 Agent（RAG + 工具）处理
+        features: { auto_send_asr_to_llm: false, vad_merge_mode: true },
+        agentCallbacks: {
+          onASRResult(r){
+            if (!r || !r.text) return;
+            ASR_TEXT = r.text;
+            if (r.isFinal) ask(ASR_TEXT, "voice");      // 最终结果 → 走我方问答链路
+          },
+          onAgentStateChange(st){ setState(mapSdkState(st)); },
+          onError(err){ console.warn("星云 Agent:", err); }
+        }
       };
       if (av && av.e2e_server && av.auth_token){
         opts.e2eServer = av.e2e_server;
@@ -449,11 +464,77 @@ function initViewUI(){
 }
 
 // 播报：在线走星云实时驱动，离线回退浏览器语音
-async function say(text){
+// 具身协同：情绪（表情+语调）与关键动作（手势）随回答内容自动匹配
+function affectOf(d){
+  const txt = (d && d.text) || "";
+  const kinds = ((d && d.widgets) || []).map(w => w.type);
+  if ((d && d.mode) === "killed" || kinds.includes("handoff")) return { emotion: "sad", ka: "Apologize" };
+  if (txt.includes("不达标") || txt.includes("未满足")) return { emotion: "angry", ka: "KeyPoints" };
+  if (kinds.includes("checklist") || kinds.includes("quote")) return { emotion: "happy", ka: "Pointscreen" };
+  if (txt.includes("你好") || txt.includes("欢迎")) return { emotion: "happy", ka: "Hello" };
+  return { emotion: "neutral", ka: "" };
+}
+function buildSsml(text, opts){
+  const safe = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ka = opts && opts.ka
+    ? `<ue4event><type>ka_intent</type><data><ka_intent>${opts.ka}</ka_intent></data></ue4event>` : "";
+  return `<speak>${ka}${safe}</speak>`;
+}
+function splitSentences(text, max){
+  const flat = String(text).split(/\s+/).filter(Boolean).join(" ");
+  const parts = flat.split(/(?<=[。！？；])/).filter(s => s.trim());
+  const out = [];
+  for (const s of parts){
+    if (out.length && (out[out.length - 1] + s).length <= max) out[out.length - 1] += s;
+    else out.push(s);
+  }
+  return out.length ? out : [String(text)];
+}
+// 播报：在线走星云（SSML 分段 + 情绪 + 动作），离线/未开放回退浏览器语音
+async function say(text, opts){
   if (AGENT && typeof AGENT.speak === "function"){
-    try { await AGENT.speak(text); return; } catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
+    try{
+      const segs = splitSentences(text, 60);
+      for (let i = 0; i < segs.length; i++){
+        const first = i === 0, last = i === segs.length - 1;
+        AGENT.speak(buildSsml(segs[i], opts), first, last,
+                    opts && opts.emotion ? { emotion: opts.emotion } : undefined);
+      }
+      return;
+    }catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
   }
   speak(text);
+}
+
+// 语音输入（ASR）与客户端打断（interrupt）——评审点名要求的容错能力
+let MIC = { on: false }, ASR_TEXT = "";
+async function toggleMic(){
+  const btn = $("#btnMic");
+  if (!(AGENT && typeof AGENT.startASR === "function")){
+    bubble("bot", "语音输入需要数字人会话在线（当前是文字 + 卡片版）；麦克风由浏览器直接授权，不会上传到我们服务器以外的第三方。");
+    return;
+  }
+  try{
+    if (MIC.on){
+      await AGENT.stopASR(); MIC.on = false; btn.textContent = "🎤 语音输入"; setState("Listen");
+    } else {
+      setState("Listen"); await AGENT.startASR(); MIC.on = true; btn.textContent = "⏹ 结束录音";
+      bubble("bot", "请说话，说完我会直接回答（识别文本会先经过我方知识库与工具，再回给数字人播报）。");
+    }
+  }catch(e){
+    bubble("bot", "麦克风启动失败（" + ((e && e.message) || e) + "）。请在浏览器里允许麦克风权限后重试。");
+  }
+}
+function doInterrupt(){
+  if (AGENT && typeof AGENT.interrupt === "function"){
+    const ms = AGENT.interrupt("user_click");
+    setState("Listen");
+    try{ if (typeof AGENT.listen === "function") AGENT.listen(); }catch(e){}
+    bubble("bot", "已打断当前播报（客户端打断耗时 " + ms + " ms），可以继续提问。");
+  } else {
+    try{ speechSynthesis.cancel(); }catch(e){}
+    bubble("bot", "已打断当前语音播报。");
+  }
 }
 
 async function send(text){
@@ -485,7 +566,7 @@ async function send(text){
       $("#log").scrollTop = $("#log").scrollHeight;
     }
     (d.widgets || []).forEach(card);
-    await say(d.text);
+    await say(d.text, affectOf(d));
     // 离线时用定时器模拟"说完回到聆听"；在线时由 SDK 的 onVoiceStateChange 回调驱动
     if (!AGENT) setTimeout(() => setState("Listen", ["Listen"]), Math.min(6000, 1200 + d.text.length * 90));
   }catch(e){

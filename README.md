@@ -76,6 +76,19 @@ python scripts/dev_server.py --port 8080 --backend http://127.0.0.1:8011
 | 一键停 | `POST /api/kill` | 停用后 AI 不再作答，所有请求直接转人工，可随时恢复 |
 | 可审计引用 | `/api/chat` 返回 `evidences` | 回答逐条给出依据原文，前端「📎 查看依据原文」可折叠展开 |
 
+### 具身交互（表达层 / 交互层纵深）
+
+| 能力 | 实现 | 触发 |
+| --- | --- | --- |
+| 流式分段播报 | 按标点切分（单段 ≤60 字），逐段 `speak(ssml, is_start, is_end)` | 每次回答自动 |
+| 情绪表情 + 语调 | `speak(ssml, true, true, { emotion })`，按回答语义匹配（不达标→严肃、出卡片→开心、转人工→歉疚） | 每次回答自动 |
+| 关键动作（KA） | SSML `<ue4event><type>ka_intent</type>…` 注入（抓重点 KeyPoints / 指屏幕 Pointscreen / 问候 Hello / 致歉 Apologize） | 每次回答自动 |
+| 语音输入（ASR） | `startASR()` / `stopASR()`，`features.auto_send_asr_to_llm=false` —— **识别文本交回我方 Agent**（RAG + 工具），不经过平台大脑 | 「🎤 语音输入」按钮 |
+| 客户端打断 | `interrupt('user_click')` 立即打断播报并回到聆听姿态 | 「✋ 打断」按钮 |
+| 具身状态协同 | SDK 状态机（running / speaking / listening）与本页 Listen / Think / Speak 三态及字幕联动 | 自动 |
+
+> 这些能力依赖星云实时会话（数字人开放时）；文字 + 卡片版下按钮会给出明确引导而不是报错。
+
 ### 部署与容量设计（B 方案：半开放）
 
 数字人实时驱动**默认关闭**（`/api/admin/avatar` 后台开关控制）；无论开或关，
