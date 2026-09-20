@@ -80,6 +80,8 @@ def create_session() -> dict:
         "app_id": APP_ID,
         # 真实项目应改为向星云后端换取一次性 token；此处仅示范凭证不下发前端
         "gateway": GATEWAY,
+        # 前端据此加载星云 SDK（前端永不持有 appSecret；未配置则前端自动回退离线表现）
+        "sdk_url": os.getenv("XMOV_SDK_URL", ""),
         "ttl": SESSION_TTL,
         "issued_at": int(time.time()),
     }
@@ -121,10 +123,22 @@ def call_tool(name: str, args: dict) -> Widget | None:
             payload={"items": ["营业执照", "上年度报表", "设备清单与发票", "改造前照片"], "note": "示例数据"},
         )
     if name == "quote.calc":
+        sku = args.get("sku", "知识库部署（小微版）")
+        qty = int(args.get("qty", 1) or 1)
+        unit = int(args.get("unit_price", 5000) or 5000)
         return Widget(
             type="quote",
             title="报价卡",
-            payload={"sku": args.get("sku", "示例商品"), "qty": args.get("qty", 1), "total": "¥0.00", "note": "示例数据"},
+            payload={"sku": sku, "qty": qty, "unit": "¥%d" % unit,
+                     "total": "¥%s" % format(unit * qty, ","), "note": "示例数据，实际以正式报价为准"},
+        )
+    if name == "handoff.human":
+        return Widget(
+            type="handoff",
+            title="已为你转接人工",
+            payload={"reason": args.get("reason", "客户主动要求"),
+                     "queue": args.get("queue", "门店客服"),
+                     "note": "示例数据：真实部署时这里会带上通话记录与知识库命中的上下文"},
         )
     return None
 
@@ -195,25 +209,35 @@ async def _ask_llm(question: str, docs: list[tuple[str, str]]) -> str:
 
 def _offline_reply(text: str) -> dict:
     """离线演示：预置脚本，用于评审体验与无网络/无积分场景（D3）。"""
-    script = {
-        "你好": "您好，我是这家店里的智能导购，有什么可以帮您？",
-        "时间": "本店每天早九点到晚九点营业，节假日照常。",
-        "退货": "未拆封的商品七天内可以退换，麻烦带上购买凭证。",
-        "补贴": "我帮您列了一份补贴申报自查清单，需要的材料都在上面。",
-    }
-    for key, reply in script.items():
-        if key in text:
+    script = [
+        (("你好", "您好"), "您好，我是这家店里的智能导购，有什么可以帮您？", None),
+        (("几点", "营业", "时间"), "本店每天早九点到晚九点营业，节假日照常。", None),
+        (("退货", "退换", "换货"), "未拆封的商品七天内可以退换，麻烦带上购买凭证。", None),
+        (("补贴", "政策", "申报"), "我帮您列了一份补贴申报自查清单，需要的材料都在上面。",
+         ("policy.selfcheck", {})),
+        (("报价", "多少钱", "价格", "费用"), "按您说的情况，我拉了一张报价卡，明细在下面。",
+         ("quote.calc", {"sku": "企业知识库部署（小微版）", "qty": 1, "unit_price": 5000})),
+        (("人工", "转人", "客服电话"), "好的，正在为您转接人工客服，同时把刚才的对话一并交接过去。",
+         ("handoff.human", {"reason": "客户主动要求", "queue": "门店客服"})),
+        (("国标", "标准", "合规"), "AI 客服要过的是 GB/T 47746—2026：自查共 61 项（48 应 + 4 宜 + 9 可，含 5 项一票项），"
+                                  "其中 5 类场景必须自动转人工。", ("policy.selfcheck", {})),
+    ]
+    for keys, reply, tool in script:
+        if any(k in text for k in keys):
             widgets = []
-            if key == "补贴":
-                widgets = [call_tool("policy.selfcheck", {})]
+            if tool:
+                w = call_tool(tool[0], tool[1])
+                if w:
+                    widgets = [w.model_dump()]
             return {
                 "text": reply,
                 "sources": [],
-                "widgets": [w.model_dump() for w in widgets if w],
+                "widgets": widgets,
                 "state": ["Listen", "Think", "Speak"],
                 "mode": "offline",
             }
-    return {"text": "（离线演示模式）这是一段预置回复。", "sources": [], "widgets": [], "mode": "offline"}
+    return {"text": "（离线演示模式）这是一段预置回复。离线模式覆盖的示例问题见页面下方的按钮；"
+                    "接入在线链路后由大模型自由作答。", "sources": [], "widgets": [], "mode": "offline"}
 
 
 @app.get("/api/health")

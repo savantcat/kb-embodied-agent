@@ -53,6 +53,19 @@ docker compose up --build
 无密钥时（评委快速体验）：以 `DEMO_MODE=offline` 启动，前端进入**离线演示模式**，
 用预置对话脚本展示界面与交互流程，不消耗任何积分。
 
+### 不用 Docker 的本地快速验证（开发用）
+
+```bash
+# 1) 起后端（离线演示模式）
+cd backend && DEMO_MODE=offline KB_PATH=../kb python -m uvicorn app.main:app --port 8011
+# 2) 另开一个终端：起前端静态页 + /api 反向代理
+python scripts/dev_server.py --port 8080 --backend http://127.0.0.1:8011
+# 3) 浏览器打开 http://127.0.0.1:8080
+```
+
+页面上的快捷问题按钮可依次触发四类行动层能力：知识检索、**合规自查清单卡**、
+**报价卡**、**转人工卡**（`/api/chat` 返回 `widgets` 数组，前端按类型渲染）。
+
 ## 5. 配置说明（脱敏）
 
 所有密钥仅存在于服务端 `.env`（不进仓库）；前端**不内置** appSecret，
@@ -61,6 +74,7 @@ docker compose up --build
 | 变量 | 说明 |
 |---|---|
 | `XMOV_APP_ID` / `XMOV_APP_SECRET` | 魔珐星云应用凭证（服务端持有） |
+| `XMOV_SDK_URL` | 星云前端 SDK 地址；留空则前端自动使用离线表现（不加载外部脚本） |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 大模型（OpenAI 兼容端点，默认 DeepSeek） |
 | `KB_PATH` | 企业知识库语料目录（默认 `./kb`，仓库内只放**示例语料**） |
 | `MCP_SERVER_URL` | 自研 MCP 工具服务地址 |
@@ -68,6 +82,7 @@ docker compose up --build
 
 ## 6. 开源与许可
 
-Apache-2.0（见 `LICENSE`）。第三方依赖与许可清单见 `docs/dependencies.md`。
+Apache-2.0（见 `LICENSE`）。第三方依赖与许可清单见 `docs/dependencies.md`；
+能力边界与明确不做的清单见 `docs/风险与边界.md`。
 
 > 本仓库不含任何真实客户数据、企业知识库原文与商业报价；示例语料均为虚构。
