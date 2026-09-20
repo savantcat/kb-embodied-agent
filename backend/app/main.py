@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +22,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import app.standard as sm
 
 load_dotenv()
 
@@ -31,7 +35,10 @@ SDK_URL = os.getenv("XMOV_SDK_URL", "https://media.xingyun3d.com/xingyun3d/gener
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
-KB_PATH = Path(os.getenv("KB_PATH", "./kb"))
+# 语料目录：默认按本文件位置解析到仓库根的 kb/（这样不管从哪个目录启动都能读到 kb/），
+# 可用 KB_PATH 覆盖（docker 里由 compose 指定）
+_DEFAULT_KB = Path(__file__).resolve().parents[2] / "kb"
+KB_PATH = Path(os.getenv("KB_PATH") or _DEFAULT_KB)
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "")
 DEMO_MODE = os.getenv("DEMO_MODE", "online")
 SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "900"))
@@ -146,33 +153,75 @@ def create_session() -> dict:
     }
 
 
+# ---------------------------------------------------------------- 语料加载
+# 语料以 kb/*.md 为真源（数据驱动，可整体替换为真实企业语料）：
+#   ### Q: 问题
+#   关键词: a, b, c        ← 口语别名，命中即召回
+#   A: 答案
+#   来源: 出处标签
+QA_Q = re.compile(r"^###\s*Q[:：]\s*(.+)$")
+QA_KW = re.compile(r"^(?:关键词|Keywords)[:：]\s*(.+)$", re.I)
+QA_A = re.compile(r"^(?:A|答)[:：]\s*(.+)$")
+QA_SRC = re.compile(r"^(?:来源|Source)[:：]\s*(.+)$", re.I)
+
+
+def load_corpus() -> list[dict]:
+    """解析 kb/*.md 为问答条目列表；kb/ 为空时回退到内置 DEMO_KB。"""
+    entries: list[dict] = []
+    if KB_PATH.is_dir():
+        for path in sorted(KB_PATH.glob("*.md")):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            cur: dict | None = None
+            for raw in text.splitlines():
+                line = raw.strip()
+                m = QA_Q.match(line)
+                if m:
+                    cur = {"q": m.group(1).strip(), "kw": [], "a": "", "src": path.stem}
+                    entries.append(cur)
+                    continue
+                if cur is None:
+                    continue
+                m = QA_KW.match(line)
+                if m:
+                    cur["kw"] = [x for x in re.split(r"[,，、\s]+", m.group(1)) if x]
+                    continue
+                m = QA_A.match(line)
+                if m:
+                    cur["a"] = m.group(1).strip()
+                    continue
+                m = QA_SRC.match(line)
+                if m:
+                    cur["src"] = m.group(1).strip()
+                    continue
+            # 清理：无答案的条目丢弃
+        entries = [e for e in entries if e["a"]]
+    if not entries:  # 回退：内置示例（评委拿到的是含 kb/ 的仓库，正常走上面分支）
+        entries = [{"q": k, "kw": v["aliases"], "a": v["answer"], "src": v["source"]}
+                   for k, v in DEMO_KB.items()]
+    return entries
+
+
+CORPUS = load_corpus()
+
+
 # ---------------------------------------------------------------- 检索（RAG）
 
 def retrieve(query: str, top_k: int = 3) -> list[tuple[str, str, str]]:
-    """最小可用检索：别名命中 + 字符重叠打分（生产替换为向量 + 关键词混合检索，见 ARCHITECTURE D4）。
+    """关键词别名命中 + 问句重合度打分，返回 [(问题, 答案, 来源)]。
 
-    返回 [(主题, 答案, 来源标签)]，按得分降序。别名表让"未拆封能退吗""几点开门"这类口语问法也能命中。
+    命中判定必须有别名或问句实词重合；都不命中就交回上层走"不知道 + 转人工"。
+    生产替换为向量 + 关键词混合检索并重排（见 ARCHITECTURE D4）。
     """
     scored: list[tuple[int, str, str, str]] = []
-    for topic, item in DEMO_KB.items():
-        aliases = item.get("aliases", [])
-        alias_hits = [a for a in aliases if a in query]
-        # 命中判定：必须有别名或主题命中（字符重叠只用于排序，不作为命中依据，否则噪声来源满天飞）
-        if not alias_hits and topic not in query:
+    for e in CORPUS:
+        kw_hits = [k for k in e["kw"] if k and k in query]
+        q_overlap = sum(1 for ch in set(query) if ch in e["q"] and ch not in "的了是在有和与吗呢？?什么怎么")
+        if not kw_hits and q_overlap < 3:
             continue
-        score = 2 * len(alias_hits) + (3 if topic in query else 0)
-        score += sum(1 for ch in set(query) if ch in item["answer"] and ch not in "的了是在有和与吗呢")
-        scored.append((score, topic, item["answer"], item["source"]))
+        score = 3 * len(kw_hits) + q_overlap + (6 if e["q"] in query else 0)
+        scored.append((score, e["q"], e["a"], e["src"]))
     scored.sort(key=lambda x: -x[0])
-
-    hits: list[tuple[str, str, str]] = [(t, a, s) for _, t, a, s in scored]
-    if KB_PATH.is_dir():
-        for path in sorted(KB_PATH.glob("*.md")):
-            body = path.read_text(encoding="utf-8", errors="ignore")
-            for line in body.splitlines():
-                if line.strip() and line.strip()[:12] and line.strip()[:12] in query:
-                    hits.append((path.stem, line.strip(), path.name))
-    return hits[:top_k]
+    return [(q, a, s) for _, q, a, s in scored[:top_k]]
 
 
 # ---------------------------------------------------------------- 行动层（MCP）
@@ -190,18 +239,24 @@ def call_tool(name: str, args: dict) -> Widget | None:
     if name == "policy.selfcheck":
         return Widget(
             type="checklist",
-            title="补贴申报自查清单",
-            payload={"items": ["营业执照", "上年度报表", "设备清单与发票", "改造前照片"], "note": "示例数据"},
+            title="AI 客服合规自查清单（节选）",
+            payload={"items": [
+                "人工坐席数量与在线时段是否明确（A1）",
+                "是否有人机协同服务制度（A2）",
+                "对话界面是否设「转人工服务」入口（B17）",
+                "五类场景是否自动转接人工（B21a–e，一票项）",
+                "切换人工时是否同步身份与历史记录（B13）",
+                "客户信息是否分级备份（E1）",
+            ], "note": "示例卡：完整 61 项（48 应 + 4 宜 + 9 可）可对接工具生成"},
         )
     if name == "quote.calc":
-        sku = args.get("sku", "知识库部署（小微版）")
+        sku = args.get("sku", "企业知识库部署（小微场景）")
         qty = int(args.get("qty", 1) or 1)
-        unit = int(args.get("unit_price", 5000) or 5000)
         return Widget(
             type="quote",
-            title="报价卡",
-            payload={"sku": sku, "qty": qty, "unit": "¥%d" % unit,
-                     "total": "¥%s" % format(unit * qty, ","), "note": "示例数据，实际以正式报价为准"},
+            title="服务报价单（示例卡）",
+            payload={"sku": sku, "qty": qty, "unit": "按语料量与部署方式核算",
+                     "total": "面议", "note": "演示用示例卡：不在语料与界面中展示价格"},
         )
     if name == "handoff.human":
         return Widget(
@@ -212,6 +267,142 @@ def call_tool(name: str, args: dict) -> Widget | None:
                      "note": "示例数据：真实部署时这里会带上通话记录与知识库命中的上下文"},
         )
     return None
+
+
+# ---------------------------------------------------------------- 信任层
+# ① 一键停（Kill Switch）：停用后所有问答直接转人工，AI 不再作答
+# ② 操作留痕：每次问答落盘 logs/audit.jsonl 并可回查（"出事了能说清"）
+# ③ 可审计引用：回答携带来源，前端可折叠查看依据原文
+KILL = {"stopped": False, "reason": "", "at": None}
+
+# 示例企业现状（演示用基线；某项不在表中即视为"满足"）：
+# 4 项不满足 + 5 项部分满足 = 9 项待整改，其中一票项 B21a / B21c 未满足 → 结论"不达标"。
+# 仅用于演示判定分级与整改动作，报告里明确标注"示例企业现状"。
+DEMO_BASELINE_OVERRIDE = {
+    "B21a": "不满足",   # 一票项：未设交互失败阈值（几轮没识别就该转）
+    "B21c": "不满足",   # 一票项：涉信息安全未强制转人工
+    "E1": "不满足",     # 未建分级备份
+    "F5": "不满足",     # 未做系统监测
+    "A7": "部分",       # 有知识库但不更新
+    "A11": "部分",      # 切换时同步数据不全
+    "B14": "部分",      # 切换等待未告知时长
+    "B20": "部分",      # 自动转人工/情绪感知能力弱
+    "D6": "部分",       # 服务记录/工单闭环不全
+}
+DEMO_BASELINE = {i: DEMO_BASELINE_OVERRIDE.get(i, "满足") for i in sm.ids()}
+AUDIT: list[dict] = []
+LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "audit.jsonl"
+
+
+def record_audit(entry: dict) -> None:
+    entry["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    AUDIT.append(entry)
+    del AUDIT[:-200]  # 只保留最近 200 条在内存
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- 国标体检（A）
+
+@app.get("/api/standard")
+def standard_info() -> dict:
+    return sm.summary()
+
+
+class SelfCheckIn(BaseModel):
+    answers: dict[str, str] = {}
+
+
+@app.post("/api/selfcheck")
+def selfcheck(body: SelfCheckIn) -> dict:
+    """国标自查体检：返回判定结论 + 逐项结果 + Markdown 整改清单。
+
+    演示用法：不传 answers 时按内置「示例企业现状」出报告（便于演示判定分级与整改动作），
+    前端也可逐项勾选后重新体检，实时看结论变化。
+    """
+    answers = dict(body.answers or {})
+    baseline = not answers
+    if baseline:
+        answers = dict(DEMO_BASELINE)
+    report = sm.evaluate(answers)
+    report["baseline"] = baseline
+    if baseline:
+        report["verdict_reason"] += "（当前为示例企业现状；换成贵司实际答复即可重算）"
+    record_audit({"kind": "selfcheck", "verdict": report["verdict"],
+                  "answered": len(answers), "miss_veto": report["summary"]["miss_veto"]})
+    report["markdown"] = sm.to_markdown(report)
+    return report
+
+
+# ---------------------------------------------------------------- 知识库体检（B）
+
+# 探针问题：覆盖"该覆盖的常见问题"，未命中即语料缺口（含 2 条故意语料外的问题作为对照）
+KB_PROBES = [
+    "国标要自查多少项", "什么时候必须转人工", "转人工要不要重新说一遍问题",
+    "知识库为什么总是不好用", "语料要准备成什么格式", "知识库多久更新一次",
+    "交付一次要多久", "支持哪些部署方式", "数据安全怎么保证", "这套东西三年后会过时吗",
+    "今天天气怎么样", "你们公司老板是谁",
+]
+
+
+@app.post("/api/kb-audit")
+def kb_audit() -> dict:
+    """知识库体检：用探针问题跑检索，给出覆盖率与缺口清单。
+
+    这是"知识库死于运营而非技术"那个痛点的工具化——把"缺什么料"变成可执行清单。
+    """
+    covered, gaps = [], []
+    for q in KB_PROBES:
+        hits = retrieve(q)
+        if hits:
+            covered.append({"q": q, "src": hits[0][2], "answer_head": hits[0][1][:40]})
+        else:
+            gaps.append({"q": q, "suggest": "建议补充该主题语料（一问一答 + 来源标签）"})
+    total = len(KB_PROBES)
+    report = {
+        "corpus_files": len(list(KB_PATH.glob("*.md"))) if KB_PATH.is_dir() else 0,
+        "corpus_entries": len(CORPUS),
+        "probes": total,
+        "covered": len(covered),
+        "coverage": round(len(covered) / total * 100) if total else 0,
+        "covered_detail": covered,
+        "gaps": gaps,
+        "note": "对照探针里含 2 条语料外问题（如天气、内部人事），未命中属预期行为——"
+                "此时数字员工会说不知道并转人工，而不是编造。",
+    }
+    record_audit({"kind": "kb-audit", "coverage": report["coverage"], "gaps": len(gaps)})
+    return report
+
+
+# ---------------------------------------------------------------- 一键停 / 留痕
+
+class KillIn(BaseModel):
+    reason: str = "人工接管"
+    stopped: bool = True
+
+
+@app.post("/api/kill")
+def kill_switch(body: KillIn) -> dict:
+    KILL["stopped"] = bool(body.stopped)
+    KILL["reason"] = body.reason
+    KILL["at"] = time.strftime("%Y-%m-%d %H:%M:%S") if body.stopped else None
+    record_audit({"kind": "kill-switch", "stopped": KILL["stopped"], "reason": body.reason})
+    return {"stopped": KILL["stopped"], "reason": KILL["reason"], "at": KILL["at"],
+            "note": "停用后 AI 不再作答，所有请求直接转人工；可随时恢复"}
+
+
+@app.get("/api/kill")
+def kill_state() -> dict:
+    return {"stopped": KILL["stopped"], "reason": KILL["reason"], "at": KILL["at"]}
+
+
+@app.get("/api/audit")
+def audit_tail(limit: int = 20) -> dict:
+    return {"total": len(AUDIT), "items": AUDIT[-limit:][::-1]}
 
 
 # ---------------------------------------------------------------- 主链路
@@ -231,6 +422,18 @@ async def chat(body: ChatIn) -> dict:
     if DEMO_MODE == "offline":
         return _offline_reply(text)
 
+    # 一键停：AI 已停用 → 一律转人工，不再作答
+    if KILL["stopped"]:
+        w = call_tool("handoff.human", {"reason": "AI 已人工停用（" + (KILL["reason"] or "人工接管") + "）", "queue": "人工坐席"})
+        record_audit({"kind": "chat", "text": text, "stopped": True, "handoff": True})
+        return {
+            "text": "AI 已停用，正在为您转接人工坐席，请稍等。",
+            "sources": [],
+            "widgets": [w.model_dump()] if w else [],
+            "state": ["Listen", "Think", "Speak"],
+            "mode": "killed",
+        }
+
     docs = retrieve(text)
     widgets: list[Widget] = []
 
@@ -249,15 +452,27 @@ async def chat(body: ChatIn) -> dict:
             widgets.append(w)
 
     answer = await _ask_llm(text, docs)
+    handoff = False
     if not docs and not widgets:
         answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
-        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "门店客服"})
+        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席"})
         if w:
             widgets.append(w)
+            handoff = True
+    else:
+        handoff = any(w.type == "handoff" for w in widgets)
+
+    record_audit({
+        "kind": "chat", "session_id": body.session_id, "text": text,
+        "sources": [t for t, _a, _s in docs], "tools": [w.type for w in widgets],
+        "handoff": handoff, "llm": bool(LLM_API_KEY),
+    })
 
     return {
         "text": answer,
         "sources": [t for t, _a, _s in docs],
+        # 可审计引用：同时给出依据原文，前端可折叠查看
+        "evidences": [{"src": s, "text": a} for _q, a, s in docs],
         "widgets": [w.model_dump() for w in widgets],
         "state": ["Listen", "Think", "Speak"],
     }
@@ -288,17 +503,17 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]]) -> str:
 def _offline_reply(text: str) -> dict:
     """离线演示：预置脚本，用于评审体验与无网络/无积分场景（D3）。"""
     script = [
-        (("你好", "您好"), "您好，我是这家店里的智能导购，有什么可以帮您？", None),
-        (("几点", "营业", "时间"), "本店每天早九点到晚九点营业，节假日照常。", None),
-        (("退货", "退换", "换货"), "未拆封的商品七天内可以退换，麻烦带上购买凭证。", None),
-        (("补贴", "政策", "申报"), "我帮您列了一份补贴申报自查清单，需要的材料都在上面。",
-         ("policy.selfcheck", {})),
-        (("报价", "多少钱", "价格", "费用"), "按您说的情况，我拉了一张报价卡，明细在下面。",
-         ("quote.calc", {"sku": "企业知识库部署（小微版）", "qty": 1, "unit_price": 5000})),
-        (("人工", "转人", "客服电话"), "好的，正在为您转接人工客服，同时把刚才的对话一并交接过去。",
-         ("handoff.human", {"reason": "客户主动要求", "queue": "门店客服"})),
-        (("国标", "标准", "合规"), "AI 客服要过的是 GB/T 47746—2026：自查共 61 项（48 应 + 4 宜 + 9 可，含 5 项一票项），"
-                                  "其中 5 类场景必须自动转人工。", ("policy.selfcheck", {})),
+        (("你好", "您好"), "您好，我是这家企业的知识库数字员工，有什么可以帮您？", None),
+        (("国标", "标准", "合规", "多少项"), "AI 客服要过的是 GB/T 47746—2026：自查共 61 项（48 应 + 4 宜 + 9 可，含 5 项一票项），"
+                                            "我给您列一份自查清单。", ("policy.selfcheck", {})),
+        (("转人工", "人工", "客服电话"), "好的，正在为您转接人工客服，同时把刚才的对话一并交接过去，您不用再重复描述一次。",
+         ("handoff.human", {"reason": "客户主动要求", "queue": "服务坐席"})),
+        (("知识库", "不好用", "答不准"), "大多不是技术问题，而是运营问题：知识是业务过程的产物，不是一堆文件。"
+                                          "指定维护人、设更新节奏、用真实问题回归测试，效果才稳。", None),
+        (("交付", "多久", "部署", "实施"), "典型分四步：需求与语料盘点、知识库搭建、联调回归、培训验收并留维护手册，全程可远程。", None),
+        (("报价", "多少钱", "价格", "费用"), "按语料量与部署方式核算，我给您一张报价卡（演示用示例卡）。",
+         ("quote.calc", {"sku": "企业知识库部署（小微场景）", "qty": 1})),
+        (("几点", "营业", "时间"), "我们服务时间为工作日 9:00-18:00，其他时间留言次日回复。", None),
     ]
     for keys, reply, tool in script:
         if any(k in text for k in keys):
