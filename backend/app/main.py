@@ -573,6 +573,17 @@ def handoff_ticket(body: TicketIn) -> dict:
                                         body.sources, body.history, body.summary))
 
 
+@app.post("/api/admin/clear-tickets")
+def clear_tickets(request: Request) -> dict:
+    """清空演示工单（管理接口，需 ADMIN_TOKEN；录演示前清场用）。"""
+    if not _admin_ok(request, request.headers.get("x-admin-token", "")):
+        raise HTTPException(403, "需要管理口令（ADMIN_TOKEN）")
+    n = len(TICKETS)
+    TICKETS.clear(); TAKEOVER.clear()
+    record_audit({"kind": "clear-tickets", "count": n})
+    return {"ok": True, "cleared": n}
+
+
 @app.get("/api/handoff/queue")
 def handoff_queue() -> dict:
     """坐席工作台：待接入 + 进行中的工单列表。"""
@@ -646,9 +657,26 @@ class ReleaseIn(BaseModel):
     note: str = ""
 
 
+async def _back_to_ai_greeting(tk: dict) -> str:
+    """数字客服接手后的主动问候：结合刚才的问题，问候并确认是否已解决。"""
+    tmpl = ("我是数字客服，已经接手啦。刚才您提到的问题，"
+            "请问现在解决了吗？还有什么需要我帮您处理的？")
+    if not LLM_API_KEY:
+        return tmpl
+    hist = [{"role": "user", "content": m["text"]} for m in tk["messages"] if m["role"] == "customer"]
+    try:
+        return await _ask_llm(
+            "（这是人工坐席把会话交回给你之后的接手开场。请用一句话主动问候，"
+            "说明你已经接手了，并询问对方刚才的问题是否已经解决、还有什么需要帮忙；"
+            "口语化、不超过 60 字，不要重复客户的原文。）",
+            [], hist[-4:], {}, memory_ok=True)
+    except Exception:
+        return tmpl
+
+
 @app.post("/api/handoff/release")
-def handoff_release(body: ReleaseIn) -> dict:
-    """坐席把会话交回数字客服：解除接管，AI 恢复应答。"""
+async def handoff_release(body: ReleaseIn) -> dict:
+    """坐席把会话交回数字客服：解除接管，AI 恢复应答，并由数字客服主动开口确认。"""
     tk = TICKETS.get(body.ticket)
     if not tk:
         raise HTTPException(404, "工单不存在")
@@ -656,7 +684,17 @@ def handoff_release(body: ReleaseIn) -> dict:
     tk["messages"].append({"role": "system", "text": "已转回数字客服，AI 恢复应答",
                            "ts": time.strftime("%H:%M:%S")})
     TAKEOVER.pop(tk["session_id"], None)
-    record_audit({"kind": "handoff-release", "ticket": tk["id"], "note": body.note})
+    # 数字客服主动打招呼（带上下文；失败也有模板兜底，绝不让客户面对空白）
+    try:
+        greet = await _back_to_ai_greeting(tk)
+    except Exception:
+        greet = "我是数字客服，已经接手啦。请问刚才的问题解决了吗？还有什么需要我帮您处理的？"
+    if not greet or "NO_INFO" in greet:
+        greet = "我是数字客服，已经接手啦。请问刚才的问题解决了吗？还有什么需要我帮您处理的？"
+    tk["messages"].append({"role": "ai", "text": greet, "ts": time.strftime("%H:%M:%S")})
+    _remember(tk["session_id"], "assistant", greet)
+    record_audit({"kind": "handoff-release", "ticket": tk["id"], "note": body.note,
+                  "greeting": greet[:40]})
     return _public_ticket(tk)
 
 

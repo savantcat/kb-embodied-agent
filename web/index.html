@@ -300,6 +300,11 @@ function startHandoffPoll(tid, stateEl){
             if (stateEl) stateEl.textContent = m.text;
             bubble("bot", m.text, "工单 " + tid);
             emb("Action", "人工坐席事件：" + m.text);
+          } else if (m.role === "ai"){
+            // 数字客服主动接手问候：由数字人开口说，并同步字幕与具身事件
+            bubble("bot", m.text, "🤖 数字客服（已接手） · " + m.ts);
+            say(m.text, {emotion: "happy", ka: "Hello"});
+            emb("Speak", "数字客服主动问候：" + m.text.slice(0, 14));
           } else {
             bubble("human", m.text, "🎧 人工坐席 " + (d.agent || "") + " · " + m.ts);
             say(m.text);
