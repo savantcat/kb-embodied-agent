@@ -37,10 +37,58 @@ DEMO_MODE = os.getenv("DEMO_MODE", "online")
 SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "900"))
 
 # 演示用虚构语料（真实企业语料只存在本地 kb/，绝不入库）
+# 结构：主题 → {aliases 命中词, answer 答案, source 来源标签}
 DEMO_KB = {
-    "营业时间": "本店每天 9:00-21:00 营业，节假日照常。",
-    "退换货": "未拆封商品 7 天内可退换，需提供购买凭证。",
-    "政策": "小微企业数字化改造补贴按设备与软件投入的一定比例补贴，需先备案后采购。",
+    "营业时间": {
+        "aliases": ["几点", "营业", "开门", "关门", "上班", "休息", "节假日", "营业时间", "开张"],
+        "answer": "本店每天 9:00-21:00 营业，节假日照常。",
+        "source": "门店信息",
+    },
+    "退换货": {
+        "aliases": ["退", "换货", "退货", "退款", "售后", "不满意", "不要了", "换一个", "七天"],
+        "answer": "未拆封商品 7 天内可退换，需提供购买凭证；已拆封的请到店说明情况，我们按厂家售后政策处理。",
+        "source": "售后政策",
+    },
+    "数字化改造补贴": {
+        "aliases": ["补贴", "政策", "申报", "扶持", "奖励", "专项资金", "改造", "数字化"],
+        "answer": "小微企业数字化改造补贴按设备与软件投入的一定比例补贴，需先备案后采购。",
+        "source": "政策汇编",
+    },
+    "发票": {
+        "aliases": ["发票", "开票", "税号", "抬头", "报销", "收据"],
+        "answer": "支持开电子发票，把抬头和税号给我们即可；当月订单请在次月 10 日前申请。",
+        "source": "财务口径",
+    },
+    "配送与安装": {
+        "aliases": ["送货", "配送", "安装", "上门", "快递", "几天到", "运费", "包邮"],
+        "answer": "市区内满 500 元免费送货，安装服务需提前一天预约，上门费按区域收取。",
+        "source": "服务政策",
+    },
+    "保修": {
+        "aliases": ["保修", "质保", "坏了", "维修", "保养", "三包"],
+        "answer": "整机保修一年、主要部件保修两年，保留好购买凭证与保修卡即可。",
+        "source": "售后政策",
+    },
+    "价格与优惠": {
+        "aliases": ["多少钱", "价格", "报价", "优惠", "折扣", "便宜", "活动", "促销"],
+        "answer": "价格随型号与配置不同，可以告诉我您看中的型号，我给您拉一张报价卡。",
+        "source": "价格口径",
+    },
+    "预约与到店": {
+        "aliases": ["预约", "到店", "上门", "预约时间", "排队", "现场"],
+        "answer": "可以提前预约，预约后到店直接办理、不用排队；临时到店我们会按现场顺序安排。",
+        "source": "门店信息",
+    },
+    "联系方式": {
+        "aliases": ["电话", "联系", "地址", "在哪", "怎么找", "导航", "客服电话"],
+        "answer": "门店地址与客服电话可以在页面底部看到；紧急事项也可以直接让我为您转人工。",
+        "source": "门店信息",
+    },
+    "支付方式": {
+        "aliases": ["支付", "付款", "微信", "支付宝", "刷卡", "现金", "分期"],
+        "answer": "支持微信、支付宝、刷卡与现金；大额订单可申请分期，需要现场审核。",
+        "source": "财务口径",
+    },
 }
 
 app = FastAPI(title="KB Embodied Agent", version="0.1.0")
@@ -100,18 +148,30 @@ def create_session() -> dict:
 
 # ---------------------------------------------------------------- 检索（RAG）
 
-def retrieve(query: str, top_k: int = 3) -> list[tuple[str, str]]:
-    """最小可用检索：关键词命中。生产替换为向量 + 关键词混合检索（见 ARCHITECTURE D4）。"""
-    hits: list[tuple[str, str]] = []
-    for key, text in DEMO_KB.items():
-        if key in query:
-            hits.append((key, text))
+def retrieve(query: str, top_k: int = 3) -> list[tuple[str, str, str]]:
+    """最小可用检索：别名命中 + 字符重叠打分（生产替换为向量 + 关键词混合检索，见 ARCHITECTURE D4）。
+
+    返回 [(主题, 答案, 来源标签)]，按得分降序。别名表让"未拆封能退吗""几点开门"这类口语问法也能命中。
+    """
+    scored: list[tuple[int, str, str, str]] = []
+    for topic, item in DEMO_KB.items():
+        aliases = item.get("aliases", [])
+        alias_hits = [a for a in aliases if a in query]
+        # 命中判定：必须有别名或主题命中（字符重叠只用于排序，不作为命中依据，否则噪声来源满天飞）
+        if not alias_hits and topic not in query:
+            continue
+        score = 2 * len(alias_hits) + (3 if topic in query else 0)
+        score += sum(1 for ch in set(query) if ch in item["answer"] and ch not in "的了是在有和与吗呢")
+        scored.append((score, topic, item["answer"], item["source"]))
+    scored.sort(key=lambda x: -x[0])
+
+    hits: list[tuple[str, str, str]] = [(t, a, s) for _, t, a, s in scored]
     if KB_PATH.is_dir():
         for path in sorted(KB_PATH.glob("*.md")):
             body = path.read_text(encoding="utf-8", errors="ignore")
             for line in body.splitlines():
                 if line.strip() and line.strip()[:12] and line.strip()[:12] in query:
-                    hits.append((path.stem, line.strip()))
+                    hits.append((path.stem, line.strip(), path.name))
     return hits[:top_k]
 
 
@@ -179,27 +239,34 @@ async def chat(body: ChatIn) -> dict:
         w = call_tool("policy.selfcheck", {})
         if w:
             widgets.append(w)
-    if any(k in text for k in ("报价", "多少钱", "价格")):
+    if any(k in text for k in ("报价", "多少钱", "价格", "费用")):
         w = call_tool("quote.calc", {"sku": "示例商品", "qty": 1})
+        if w:
+            widgets.append(w)
+    if any(k in text for k in ("转人工", "人工", "客服电话", "投诉")):
+        w = call_tool("handoff.human", {"reason": "客户主动要求", "queue": "门店客服"})
         if w:
             widgets.append(w)
 
     answer = await _ask_llm(text, docs)
     if not docs and not widgets:
         answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
+        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "门店客服"})
+        if w:
+            widgets.append(w)
 
     return {
         "text": answer,
-        "sources": [k for k, _ in docs],
+        "sources": [t for t, _a, _s in docs],
         "widgets": [w.model_dump() for w in widgets],
         "state": ["Listen", "Think", "Speak"],
     }
 
 
-async def _ask_llm(question: str, docs: list[tuple[str, str]]) -> str:
+async def _ask_llm(question: str, docs: list[tuple[str, str, str]]) -> str:
     if not LLM_API_KEY:
         return "（未配置 LLM_API_KEY，当前为本地骨架输出）" + (docs[0][1] if docs else "")
-    ctx = "\n".join(f"[{k}] {v}" for k, v in docs) or "（无检索结果，不得编造）"
+    ctx = "\n".join(f"[{t}·{s}] {a}" for t, a, s in docs) or "（无检索结果，不得编造）"
     payload = {
         "model": LLM_MODEL,
         "messages": [
