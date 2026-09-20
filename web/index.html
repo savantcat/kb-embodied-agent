@@ -88,6 +88,22 @@
   .bar{height:8px;border-radius:6px;background:#222c52;overflow:hidden;margin:6px 0}
   .bar > i{display:block;height:100%;background:linear-gradient(90deg,#33d69f,#5b8cff)}
   @media (max-width:820px){ main{grid-template-columns:1fr;height:auto} section.stage{border-right:0;border-bottom:1px solid var(--line)} }
+
+/* —— 具身状态看板 / 弱网演练 / 适老化 —— */
+.netbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #5a4520;background:#241d0f;color:#f59e0b;border-radius:8px;font-size:12.5px}
+.embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden}
+.embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
+.embody .elog{max-height:132px;overflow:auto;padding:6px 11px;font:12px/1.7 Consolas,Menlo,monospace}
+.embody .erow{display:flex;gap:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.embody .et{color:#4b5563}
+.embody .ek{min-width:68px;flex:0 0 68px;font-weight:600}
+.embody .ed{color:var(--dim);overflow:hidden;text-overflow:ellipsis}
+body.a11y{font-size:17px}
+body.a11y #log{font-size:17px}
+body.a11y .subtitle{font-size:17px;background:#000;color:#fff;border-color:#fff}
+body.a11y .msg{font-size:17px;line-height:1.9}
+body.a11y .quick button{font-size:15px;padding:9px 13px}
+body.a11y :root{--dim:#c9d1d9}
 </style>
 </head>
 <body>
@@ -95,6 +111,8 @@
   <h1>KB-Embodied-Agent</h1>
   <span class="sub">企业知识库具身客服 · 演示（2026 上海开源软件应用创新大赛参赛作品）</span>
   <span class="badge" id="modeBadge">连接中…</span>
+  <span class="badge" id="memBadge" title="会话记忆：多轮上下文 + 个性化档案">🧠 记忆 0 轮</span>
+  <a href="/audit.html" style="background:#7c2d12;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px">🛡️ 合规红队测试台</a>
 </header>
 
 <main>
@@ -120,7 +138,17 @@
       <button class="ghost" id="btnAudit">🧾 操作留痕</button>
       <button class="ghost" id="btnMic">🎤 语音输入</button>
       <button class="ghost" id="btnStop">✋ 打断</button>
+      <button class="ghost" id="btnA11y" title="大字号 + 高对比 + 语音优先，适老化与无障碍">👵 适老化/无障碍</button>
+      <button class="ghost" id="btnNet" title="模拟弱网/断网：数字人降级、恢复后自动重连">🌐 弱网演练</button>
       <button class="danger" id="btnKill">⛔ 一键停</button>
+    </div>
+    <div class="netbanner" id="netBanner">🌐 弱网演练中：数字人已降级为文字 + 卡片版；网络恢复后自动重连</div>
+    <!-- 具身状态看板：六类具身能力与对话事件的实时绑定（证明不是「文本框 + 形象」） -->
+    <div class="embody">
+      <div class="ehd">🎭 具身状态绑定（实时）
+        <span class="edim" id="embStat">等待事件…</span>
+      </div>
+      <div class="elog" id="embLog" aria-live="polite" aria-atomic="false"></div>
     </div>
     <div class="tools" id="tools">可用工具（行动层）：加载中…</div>
   </section>
@@ -143,8 +171,61 @@ let SESSION = null, SPEAK = true, BUSY = false, AGENT = null;
 
 const QUICK = ["国标要自查多少项？", "什么时候必须转人工？", "知识库为什么总是不好用？", "交付一次要多久？", "帮我转人工"];
 
+
+// ================= 具身状态看板：六类具身能力与对话事件的实时绑定 =================
+function emb(kind, detail){
+  const box = document.getElementById("embLog"); if (!box) return;
+  const C = {Listen:"#22c55e",Think:"#3b82f6",Speak:"#a855f7",Emotion:"#f59e0b",
+             KA:"#ec4899",Interrupt:"#ef4444",Reconnect:"#06b6d4",Action:"#14b8a6",A11y:"#94a3b8"};
+  const d = document.createElement("div");
+  d.className = "erow";
+  const ts = new Date().toTimeString().slice(0, 8);
+  d.innerHTML = '<span class="et">' + ts + '</span><span class="ek" style="color:' + (C[kind] || "#8b949e") + '">' +
+                kind + '</span><span class="ed">' + String(detail || "").replace(/[<>]/g, "") + '</span>';
+  box.appendChild(d); box.scrollTop = box.scrollHeight;
+  const st = document.getElementById("embStat");
+  if (st) st.textContent = kind + (detail ? "：" + detail : "");
+}
+
+// ---- 适老化 / 无障碍模式（普惠加分项）----
+document.getElementById("btnA11y").onclick = function(){
+  const on = document.body.classList.toggle("a11y");
+  this.textContent = on ? "👵 适老化：已开启" : "👵 适老化/无障碍";
+  document.getElementById("log").setAttribute("aria-live", "polite");
+  say("已切换到" + (on ? "适老化无障碍模式，字更大、对比更强。" : "标准显示模式。"));
+  emb("A11y", on ? "开启：大字号 + 高对比 + 字幕常驻 + 语音优先" : "关闭");
+};
+
+// ---- 弱网 / 断网：降级 + 自动重连 ----
+let NET_SIM = false;
+function netBanner(show, text){
+  const b = document.getElementById("netBanner");
+  if (text) b.textContent = text;
+  b.style.display = show ? "block" : "none";
+}
+document.getElementById("btnNet").onclick = function(){
+  NET_SIM = !NET_SIM;
+  this.textContent = NET_SIM ? "🌐 恢复网络" : "🌐 弱网演练";
+  if (NET_SIM){
+    netBanner(true, "🌐 弱网演练中：数字人链路降级，文字 + 卡片版照常可用");
+    emb("Reconnect", "模拟断网：数字人降级，问答链路不受影响");
+  } else {
+    netBanner(false);
+    emb("Reconnect", "网络恢复：自动重连数字人");
+    tryReconnect();
+  }
+};
+window.addEventListener("offline", ()=>{ netBanner(true, "🌐 检测到网络断开：已自动降级为文字 + 卡片版"); emb("Reconnect","offline 事件 → 降级"); });
+window.addEventListener("online",  ()=>{ netBanner(false); emb("Reconnect","online 事件 → 自动重连"); tryReconnect(); });
+async function tryReconnect(){
+  try{
+    if (AGENT && typeof AGENT.reconnect === "function"){ await AGENT.reconnect(); emb("Reconnect","已下发重连指令"); }
+  }catch(e){ emb("Reconnect","重连未成功：" + ((e && e.message) || e)); }
+}
+
 function setState(s, all){
   $("#avatar").dataset.state = s;
+  emb(s, "具身状态 → " + s);
   document.querySelectorAll(".chip").forEach(c =>
     c.classList.toggle("active", (all || [s]).includes(c.dataset.s)));
 }
@@ -158,6 +239,7 @@ function bubble(cls, text, meta){
   return d;
 }
 function card(w){
+  emb("Action", "工具调用：" + (w.type || ""));
   const el = document.createElement("div");
   el.className = "card";
   const h = document.createElement("h4"); h.textContent = w.title || w.type; el.appendChild(h);
@@ -355,7 +437,14 @@ function loadSdk(url, av){
         containerId: "#avatar-stage",
         // 关键：不传 appId/appSecret —— 会话由服务端代建，浏览器只拿一次性 e2e 地址 + token
         // （SDK 规定两者必须成对传入；appSecret 永不出服务器，公网可安全开放）
-        onStateChange(st){ setState(mapSdkState(st)); },
+        onStateChange(st){
+          const raw = String(st || "").toLowerCase();
+          setState(mapSdkState(st));
+          if (raw.indexOf("reconnect") >= 0){ netBanner(true, "🌐 网络波动：正在自动重连数字人…"); emb("Reconnect", "SDK 进入 reconnecting"); }
+          else if (raw.indexOf("running") >= 0 && document.getElementById("netBanner").style.display === "block"){
+            netBanner(false); emb("Reconnect", "重连成功，回到 running");
+          }
+        },
         onVoiceStateChange(st){
           if (st === "start") setState("Speak");
           else if (st === "end") setState("Listen");
@@ -363,6 +452,8 @@ function loadSdk(url, av){
         onMessage(err){ console.warn("星云 SDK:", err); },
         // 功能开关：ASR 识别结果不自动送平台大脑 —— 交回我方 Agent（RAG + 工具）处理
         features: { auto_send_asr_to_llm: false, vad_merge_mode: true },
+        // 断线自动重连（SDK 内置：短重试 + 指数退避，随后重新建会话）
+        reconnect: { enabled: true, maxAttempts: 6, initialDelayMs: 500, maxDelayMs: 8000 },
         agentCallbacks: {
           onASRResult(r){
             if (!r || !r.text) return;
@@ -517,6 +608,9 @@ async function say(text, opts){
         const first = i === 0, last = i === segs.length - 1;
         AGENT.speak(buildSsml(segs[i], opts), first, last,
                     opts && opts.emotion ? { emotion: opts.emotion } : undefined);
+        emb("Speak", "分段播报 " + (i + 1) + "/" + segs.length + "：" + segs[i].slice(0, 16));
+        if (opts && opts.emotion) emb("Emotion", "情绪 → " + opts.emotion);
+        if (opts && opts.ka) emb("KA", "关键动作 → " + opts.ka);
       }
       return;
     }catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
@@ -536,7 +630,8 @@ async function toggleMic(){
     if (MIC.on){
       await AGENT.stopASR(); MIC.on = false; btn.textContent = "🎤 语音输入"; setState("Listen");
     } else {
-      setState("Listen"); await AGENT.startASR(); MIC.on = true; btn.textContent = "⏹ 结束录音";
+      setState("Listen"); emb("Listen", "开启麦克风，进入聆听");
+      await AGENT.startASR(); MIC.on = true; btn.textContent = "⏹ 结束录音";
       bubble("bot", "请说话，说完我会直接回答（识别文本会先经过我方知识库与工具，再回给数字人播报）。");
     }
   }catch(e){
@@ -545,6 +640,7 @@ async function toggleMic(){
 }
 function doInterrupt(){
   if (AGENT && typeof AGENT.interrupt === "function"){
+    emb("Interrupt", "客户端打断：立即停止播报与动作");
     const ms = AGENT.interrupt("user_click");
     setState("Listen");
     try{ if (typeof AGENT.listen === "function") AGENT.listen(); }catch(e){}
@@ -569,6 +665,13 @@ async function send(text){
       body: JSON.stringify({session_id: SESSION ? SESSION.session_id : "anon", text})
     });
     const d = await r.json();
+    if (d && d.memory){
+      const pf = d.memory.profile || {};
+      const extra = pf.name ? "（已记住称呼：" + pf.name + "）" : "";
+      const el = document.getElementById("memBadge");
+      if (el) el.textContent = "🧠 记忆 " + (d.memory.turns || 0) + " 轮" + extra;
+      emb("Think", "多轮上下文 " + (d.memory.turns || 0) + " 轮" + (pf.name ? " · 称呼 " + pf.name : ""));
+    }
     if (!r.ok){ bubble("bot", "出错：" + JSON.stringify(d).slice(0, 200)); setState("Listen"); return; }
     setState("Speak", d.state && d.state.length ? d.state : ["Speak"]);
     $("#subtitle").textContent = d.text;

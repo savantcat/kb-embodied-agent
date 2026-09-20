@@ -410,6 +410,89 @@ def admin_avatar(body: AvatarToggle, request: Request) -> dict:
     return {"ok": True, **public_stats()}
 
 
+# ---------------------------------------------------------------- 红队测试台（双数字人）
+import app.redteam as rt          # noqa: E402  （合规测试用例 + 判定引擎）
+
+
+@app.get("/api/memory")
+def memory_view(session_id: str) -> dict:
+    """查看某会话的记忆：历史轮次 + 个性化档案（长短期记忆的可验证证据）。"""
+    return {"session_id": session_id,
+            "turns": len(SESS_HISTORY.get(session_id, [])),
+            "history": SESS_HISTORY.get(session_id, [])[-6:],
+            "profile": SESS_PROFILE.get(session_id, {})}
+
+
+@app.get("/api/redteam/cases")
+def redteam_cases() -> dict:
+    """全部合规测试用例（对齐 GB/T 47746 条款，含反向用例）。"""
+    return {"cases": rt.get_cases(), "total": len(rt.CASES)}
+
+
+class JudgeIn(BaseModel):
+    case_id: str
+    turns: list[dict]
+
+
+@app.post("/api/redteam/judge")
+def redteam_judge(body: JudgeIn) -> dict:
+    """对一条用例的逐轮记录做客观判定（是否转人工/带上下文/有依据/有留痕）。"""
+    # 「留痕」不采信前端自述：直接读服务端审计文件，核对客户问题是否真的写进去了
+    audit_txt = ""
+    try:
+        ap = Path(os.getenv("AUDIT_PATH", "logs/audit.jsonl"))
+        if ap.exists():
+            audit_txt = ap.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+    for i, tn in enumerate(body.turns):
+        if tn.get("role") != "agent":
+            continue
+        q = ""
+        for j in range(i - 1, -1, -1):
+            if body.turns[j].get("role") == "customer":
+                q = str(body.turns[j].get("text") or "")
+                break
+        tn["logged"] = bool(q and q[:12] in audit_txt)
+    out = rt.judge(body.case_id, body.turns)
+    record_audit({"kind": "redteam-case", "case_id": body.case_id, "pass": out.get("pass"),
+                  "checks": [c["name"] for c in out.get("checks", []) if not c["ok"]]})
+    return out
+
+
+class KillTestIn(BaseModel):
+    case_id: str = "R12"
+    text: str = "国标要自查多少项"
+
+
+@app.post("/api/redteam/kill-test")
+async def redteam_kill_test(body: KillTestIn) -> dict:
+    """一键停回归：临时停用 AI → 走真实问答链路 → 恢复。用于验证「停用后一律转人工」。"""
+    prev = dict(KILL)
+    KILL["stopped"], KILL["reason"], KILL["at"] = True, "红队测试台：验证一键停回归", time.time()
+    try:
+        r = await chat(ChatIn(text=body.text, session_id=f"redteam-kill-{int(time.time())}"))
+    finally:
+        KILL.update(prev)
+    turns = [{"role": "customer", "text": body.text},
+             {"role": "agent", "text": r.get("text", ""), "widgets": r.get("widgets", []),
+              "sources": r.get("sources", []), "logged": r.get("logged", True)}]
+    return {"turns": turns, "mode": r.get("mode")}
+
+
+class ReportIn(BaseModel):
+    results: list[dict]
+
+
+@app.post("/api/redteam/report")
+def redteam_report(body: ReportIn) -> dict:
+    """把判定结果汇总成可导出的 Markdown 测试报告。"""
+    md = rt.report(body.results)
+    passed = sum(1 for r in body.results if r.get("pass"))
+    record_audit({"kind": "redteam-report", "total": len(body.results), "passed": passed})
+    return {"markdown": md, "total": len(body.results), "passed": passed}
+
+
 # ------------------------------------------------- 星云网关代理（密钥不出服务器，实验路径）
 @app.api_route("/api/xmov/{path:path}", methods=["POST", "DELETE", "GET"])
 async def xmov_gateway_proxy(path: str, request: Request) -> dict:
@@ -576,12 +659,22 @@ def call_tool(name: str, args: dict) -> Widget | None:
                      "total": "面议", "note": "演示用示例卡：不在语料与界面中展示价格"},
         )
     if name == "handoff.human":
+        # 上下文同步（对应国标 B13）：转人工时把客户问题、命中依据、会话号一并交接，
+        # 客户无需再重复一遍；本字段是"是否携带上下文"的客观证据。
+        hist = args.get("history") or []
         return Widget(
             type="handoff",
             title="已为你转接人工",
             payload={"reason": args.get("reason", "客户主动要求"),
                      "queue": args.get("queue", "门店客服"),
-                     "note": "示例数据：真实部署时这里会带上通话记录与知识库命中的上下文"},
+                     "context": {                       # 上下文摘要（B13）
+                         "session": args.get("session_id", ""),
+                         "question": args.get("question", ""),
+                         "sources": args.get("sources", []),
+                         "history": hist[-4:],
+                         "summary": args.get("summary", ""),
+                     },
+                     "note": "已同步客户问题与历史，坐席可直接接着聊，客户不必重复描述"},
         )
     return None
 
@@ -591,6 +684,31 @@ def call_tool(name: str, args: dict) -> Widget | None:
 # ② 操作留痕：每次问答落盘 logs/audit.jsonl 并可回查（"出事了能说清"）
 # ③ 可审计引用：回答携带来源，前端可折叠查看依据原文
 KILL = {"stopped": False, "reason": "", "at": None}
+
+# 会话轮次计数：用于 B21a/B21e「交互失败/超时阈值」
+SESS_TURNS: dict = {}
+# 会话级上下文记忆：多轮对话不从头开始（对应评审「记忆与个性化」）
+SESS_HISTORY: dict = {}      # sid -> [{"role": "user"|"assistant", "content": ...}]
+SESS_PROFILE: dict = {}      # sid -> {"name": ..., "industry": ...}
+HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "12"))
+
+
+def _remember(sid: str, role: str, content: str) -> None:
+    h = SESS_HISTORY.setdefault(sid, [])
+    h.append({"role": role, "content": content})
+    del h[:-HISTORY_TURNS]
+
+
+def _profile_update(sid: str, text: str) -> None:
+    """从对话中抽取个性化信息（称呼/行业），下次直接称呼客户、不必重问。"""
+    pf = SESS_PROFILE.setdefault(sid, {})
+    m = re.search(r"(?:我叫|我是|叫我|我姓)\s*([一-龥A-Za-z]{1,8})", text)
+    if m and "name" not in pf:
+        pf["name"] = m.group(1)
+    m2 = re.search(r"(?:我是|我在|我们)\s*([一-龥]{2,10}(?:行业|企业|公司|门店))", text)
+    if m2 and "industry" not in pf:
+        pf["industry"] = m2.group(1)
+TURN_HANDOFF = int(os.getenv("TURN_HANDOFF", "5"))   # 同一会话到第 N 轮仍未解决即转人工
 
 # 示例企业现状（演示用基线；某项不在表中即视为"满足"）：
 # 4 项不满足 + 5 项部分满足 = 9 项待整改，其中一票项 B21a / B21c 未满足 → 结论"不达标"。
@@ -741,7 +859,11 @@ async def chat(body: ChatIn) -> dict:
 
     # 一键停：AI 已停用 → 一律转人工，不再作答
     if KILL["stopped"]:
-        w = call_tool("handoff.human", {"reason": "AI 已人工停用（" + (KILL["reason"] or "人工接管") + "）", "queue": "人工坐席"})
+        w = call_tool("handoff.human", {"reason": "AI 已人工停用（" + (KILL["reason"] or "人工接管") + "）",
+                                        "queue": "人工坐席", "session_id": body.session_id,
+                                        "question": text, "sources": [],
+                                        "history": [{"role": "customer", "text": text}],
+                                        "summary": "客户在本轮提问，AI 已停用，直接转人工"})
         record_audit({"kind": "chat", "text": text, "stopped": True, "handoff": True})
         return {
             "text": "AI 已停用，正在为您转接人工坐席，请稍等。",
@@ -764,21 +886,69 @@ async def chat(body: ChatIn) -> dict:
         if w:
             widgets.append(w)
     if any(k in text for k in ("转人工", "人工", "客服电话", "投诉")):
-        w = call_tool("handoff.human", {"reason": "客户主动要求", "queue": "门店客服"})
+        w = call_tool("handoff.human", {"reason": "客户主动要求", "queue": "门店客服",
+                                        "session_id": body.session_id, "question": text,
+                                        "summary": "客户明确要求人工服务"})
         if w:
             widgets.append(w)
 
-    answer = await _ask_llm(text, docs)
+    # —— 一票项场景规则（B21a–e）：命中即转人工，且必须同步上下文 ——
+    VETO_RULES = [
+        (("身份证", "银行卡", "密码", "验证码", "转账", "支付信息"),
+         "B21c 对话涉及信息安全，转人工处理", "客户问题涉及敏感信息，转人工核验"),
+        (("过敏", "发烧", "受伤", "急救", "出事了", "有危险", "报警"),
+         "B21d 涉及人身/财产安全，立即转人工", "客户反馈人身或财产安全风险，立即转人工"),
+        (("不想跟机器", "不要机器人", "别让机器人", "叫个人来", "要真人", "转真人", "真人服务"),
+         "B21b 客户明确拒绝智能客服，立即转人工", "客户拒绝由 AI 应答，直接转人工"),
+    ]
+    for kws, reason, summary in VETO_RULES:
+        if any(k in text for k in kws):
+            w = call_tool("handoff.human", {"reason": reason, "queue": "人工坐席",
+                                            "session_id": body.session_id, "question": text,
+                                            "summary": summary,
+                                            "history": [{"role": "customer", "text": text}]})
+            if w:
+                widgets.append(w)
+            break
+
+    # 交互失败/超时阈值（B21a / B21e）：同一会话多轮仍未解决 → 转人工
+    SESS_TURNS[body.session_id] = SESS_TURNS.get(body.session_id, 0) + 1
+    if SESS_TURNS[body.session_id] >= TURN_HANDOFF and not any(w.type == "handoff" for w in widgets):
+        w = call_tool("handoff.human", {"reason": f"B21a/B21e 多轮（{SESS_TURNS[body.session_id]} 轮）仍未解决，转人工",
+                                        "queue": "人工坐席", "session_id": body.session_id,
+                                        "question": text, "summary": "连续多轮交互未达成结论，按失败阈值转人工",
+                                        "history": [{"role": "customer", "text": text}]})
+        if w:
+            widgets.append(w)
+
+    hist = SESS_HISTORY.get(body.session_id, [])
+    _profile_update(body.session_id, text)
+    if docs:
+        answer = await _ask_llm(text, docs, hist, SESS_PROFILE.get(body.session_id))
+    elif hist:
+        # 无检索结果但有会话记忆：允许据历史回答（体现"记得住、不用客户重复"）；
+        # 历史也答不上来时返回约定串 NO_INFO，走诚实转人工分支。
+        answer = await _ask_llm(text, [], hist, SESS_PROFILE.get(body.session_id),
+                                memory_ok=True)
+        if not answer or "NO_INFO" in answer:
+            answer = ""
+    else:
+        answer = await _ask_llm(text, [], hist, SESS_PROFILE.get(body.session_id))
     handoff = False
-    if not docs and not widgets:
+    if not docs and not widgets and not answer:
         answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
-        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席"})
+        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席",
+                                        "session_id": body.session_id, "question": text, "sources": [],
+                                        "history": [{"role": "customer", "text": text}],
+                                        "summary": "知识库无对应依据，未编造，转人工处理"})
         if w:
             widgets.append(w)
             handoff = True
     else:
         handoff = any(w.type == "handoff" for w in widgets)
 
+    _remember(body.session_id, "user", text)
+    _remember(body.session_id, "assistant", answer)
     record_audit({
         "kind": "chat", "session_id": body.session_id, "text": text,
         "sources": [t for t, _a, _s in docs], "tools": [w.type for w in widgets],
@@ -792,19 +962,39 @@ async def chat(body: ChatIn) -> dict:
         "evidences": [{"src": s, "text": a} for _q, a, s in docs],
         "widgets": [w.model_dump() for w in widgets],
         "state": ["Listen", "Think", "Speak"],
+        # 记忆证据：多轮上下文轮次 + 个性化档案（前端徽标可见，接口可查证）
+        "memory": {"turns": len(SESS_HISTORY.get(body.session_id, [])),
+                   "profile": SESS_PROFILE.get(body.session_id, {})},
+        "logged": True,
     }
 
 
-async def _ask_llm(question: str, docs: list[tuple[str, str, str]]) -> str:
+async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
+                   history: list[dict] | None = None, profile: dict | None = None,
+                   memory_ok: bool = False) -> str:
+    """接大模型：RAG 资料 + 会话历史 + 个性化档案（多轮对话不从头开始）。"""
     if not LLM_API_KEY:
         return "（未配置 LLM_API_KEY，当前为本地骨架输出）" + (docs[0][1] if docs else "")
     ctx = "\n".join(f"[{t}·{s}] {a}" for t, a, s in docs) or "（无检索结果，不得编造）"
+    sys_prompt = ("你是企业门店的数字人员工。只依据提供的资料回答，资料不足就说不知道并建议转人工。"
+                  "回答口语化、简短，适合语音播报。")
+    pf = profile or {}
+    if pf.get("name"):
+        sys_prompt += f"客户称呼：{pf['name']}，自然使用该称呼，不要每次重复自我介绍。"
+    if pf.get("industry"):
+        sys_prompt += f"已知客户背景：{pf['industry']}，结合该背景回答，不要重复询问。"
+    if history:
+        sys_prompt += "下面是本次会话已有对话，请保持连贯，不要重复客户已说过的信息。"
+    if memory_ok:
+        sys_prompt += ("本轮知识库里没有检索到资料，但**会话历史中可能已有答案**："
+                       "若历史里能找到，就直接依据历史作答（例如客户问『我刚才说我叫什么』就回答其称呼）；"
+                       "若历史里确实没有，只回四个字符：NO_INFO（不要编造、不要道歉）。")
+    msgs = [{"role": "system", "content": sys_prompt}]
+    msgs += [{"role": h["role"], "content": h["content"]} for h in (history or [])]
+    msgs.append({"role": "user", "content": f"资料：\n{ctx}\n\n顾客问：{question}"})
     payload = {
         "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": "你是企业门店的数字人员工。只依据提供的资料回答，资料不足就说不知道并建议转人工。回答口语化、简短，适合语音播报。"},
-            {"role": "user", "content": f"资料：\n{ctx}\n\n顾客问：{question}"},
-        ],
+        "messages": msgs,
         "temperature": 0.3,
     }
     async with httpx.AsyncClient(timeout=30) as client:

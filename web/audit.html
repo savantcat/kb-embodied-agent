@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合规红队测试台 · KB-Embodied-Agent</title>
+<style>
+:root{--bg:#0e1116;--panel:#161b22;--line:#232a34;--txt:#e6edf3;--dim:#8b949e;
+      --blue:#3b82f6;--red:#ef4444;--ok:#22c55e;--bad:#f87171;--warn:#f59e0b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+h1{font-size:17px;margin:0;font-weight:600}
+h1 small{color:var(--dim);font-weight:400;font-size:12px;margin-left:8px}
+.grow{flex:1}
+button{background:var(--blue);border:0;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+button.ghost{background:var(--panel);border:1px solid var(--line);color:var(--txt)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.red{background:var(--red)}
+.wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px 20px}
+@media(max-width:1000px){.wrap{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.panel > .hd{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font-weight:600;font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--blue)}
+.dot.r{background:var(--red)}
+.stage{position:relative;width:100%;aspect-ratio:16/9;background:#0a0d12;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px;text-align:center}
+.stage canvas,.stage video{width:100%;height:100%;object-fit:cover}
+.log{padding:10px 14px;max-height:280px;overflow:auto;font-size:13px}
+.msg{margin:0 0 8px;padding:8px 11px;border-radius:10px;max-width:92%;white-space:pre-wrap;word-break:break-word}
+.msg.a{background:#12243c;border:1px solid #1e3a5f}
+.msg.r{background:#2a1416;border:1px solid #4a2226;margin-left:auto}
+.msg .who{display:block;font-size:11px;opacity:.7;margin-bottom:3px}
+.msg .src{margin-top:6px;font-size:11px;color:var(--dim);border-top:1px dashed var(--line);padding-top:5px}
+.widget{margin-top:7px;border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:7px 9px;font-size:12px;background:#101720}
+.widget.handoff{border-left-color:var(--red);background:#1c1214}
+.widget b{font-size:12px}
+.side{padding:0 20px 20px}
+table{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#101720;color:var(--dim);font-weight:500}
+tr:last-child td{border-bottom:0}
+.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+.tag.ok{color:var(--ok);border-color:#1d4d2c;background:#0f2417}
+.tag.bad{color:var(--bad);border-color:#5a222a;background:#2a1416}
+.tag.run{color:var(--warn);border-color:#5a4520;background:#241d0f}
+.summary{display:flex;gap:18px;align-items:center;padding:10px 20px;color:var(--dim);font-size:13px}
+.summary b{color:var(--txt);font-size:15px}
+pre.report{background:#0a0d12;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;max-height:340px;font-size:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛡️ 合规红队测试台<small>双数字人 · AI 客服 vs 红队客户 · 依据 GB/T 47746—2026（61 项 / 5 项一票项）</small></h1>
+  <div class="grow"></div>
+  <span id="badge" class="tag">连接中…</span>
+  <button id="btnVeto" class="ghost">只跑一票项 5 条</button>
+  <button id="btnRun">▶ 运行全部 12 条</button>
+  <button id="btnKill" class="ghost">验证一键停</button>
+  <button id="btnReport" class="ghost" disabled>导出报告</button>
+  <a href="/" style="color:var(--dim);font-size:12px">← 返回演示页</a>
+</header>
+
+<div class="summary">
+  <span>已跑 <b id="sDone">0</b>/<b id="sTotal">12</b></span>
+  <span>达标 <b id="sOk" style="color:var(--ok)">0</b></span>
+  <span>不达标 <b id="sBad" style="color:var(--bad)">0</b></span>
+  <span>一票项达标 <b id="sVeto">0/5</b></span>
+  <span id="sNow"></span>
+</div>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="hd"><span class="dot"></span>AI 客服（我方 Agent：知识库 + 规则 + 工具）</div>
+    <div class="stage" id="stageA">数字人待启动</div>
+    <div class="log" id="logA"></div>
+  </div>
+  <div class="panel">
+    <div class="hd"><span class="dot r"></span>红队客户（按用例脚本发难）</div>
+    <div class="stage" id="stageR">数字人待启动</div>
+    <div class="log" id="logR"></div>
+  </div>
+</div>
+
+<div class="side">
+  <table id="tbl">
+    <thead><tr><th style="width:64px">用例</th><th>名称</th><th style="width:110px">条款</th><th style="width:90px">结论</th><th>关键判定</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="side" id="reportBox" style="display:none">
+  <h3 style="font-size:14px">测试报告（Markdown）</h3>
+  <pre class="report" id="reportMd"></pre>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let SDK = null, AGENT = null, RED = null, SESS = null, CASES = [], RESULTS = [], RUNNING = false;
+
+function chip(el, txt, cls){ el.className = "tag " + (cls || ""); el.textContent = txt; }
+
+// ---------------- 气泡 ----------------
+function bubble(side, who, text, extra){
+  const box = side === "a" ? $("#logA") : $("#logR");
+  const d = document.createElement("div");
+  d.className = "msg " + (side === "a" ? "a" : "r");
+  d.innerHTML = `<span class="who">${who}</span>${escapeHtml(text)}${extra || ""}`;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+function escapeHtml(s){ return String(s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function renderWidgets(ws){
+  return (ws || []).map(w => {
+    const p = w.payload || {};
+    if (w.type === "handoff"){
+      const c = p.context || {};
+      return `<div class="widget handoff"><b>🔴 转接人工</b> · ${escapeHtml(p.reason||"")}<br>
+        目标队列：${escapeHtml(p.queue||"")}<br>
+        <span style="color:var(--dim)">已同步上下文：问题「${escapeHtml((c.question||"").slice(0,26))}」· 依据 ${(c.sources||[]).length} 条 · 会话 ${escapeHtml(c.session||"")}</span></div>`;
+    }
+    if (w.type === "checklist"){
+      return `<div class="widget"><b>✅ 清单卡</b> ${escapeHtml(w.title||"")}<br><span style="color:var(--dim)">${(p.items||[]).length} 项</span></div>`;
+    }
+    return `<div class="widget"><b>🧰 ${escapeHtml(w.type)}</b> ${escapeHtml(w.title||"")}</div>`;
+  }).join("");
+}
+function renderSources(src){
+  if (!src || !src.length) return "";
+  return `<div class="src">依据：${src.map(s => escapeHtml(s)).join(" · ")}</div>`;
+}
+
+// ---------------- 数字人（两路） ----------------
+function mapState(st){
+  const s = String(st||"").toLowerCase();
+  if (s.includes("speak") || s.includes("talk")) return "Speak";
+  if (s.includes("listen") || s.includes("asr")) return "Listen";
+  if (s.includes("think") || s.includes("load") || s.includes("init")) return "Think";
+  return "Listen";
+}
+function loadSdkOnce(url){
+  return new Promise(res => {
+    if (window.XingyunAvatarAgent || window.XmovAvatar) return res(true);
+    const s = document.createElement("script");
+    s.src = url;
+    s.onload = () => res(!!(window.XingyunAvatarAgent || window.XmovAvatar));
+    s.onerror = () => res(false);
+    document.head.appendChild(s);
+  });
+}
+function buildAgent(Ctor, container, gateway, sid, onState){
+  const opts = {
+    containerId: container,
+    gatewayServer: location.origin + gateway,   // 密钥不出服务器：签名在服务端完成
+    appId: "via-server-proxy",                  // 占位值（SDK 要求非空）
+    appSecret: "via-server-proxy",
+    headers: {"X-Demo-Session": sid},
+    onStateChange(st){ onState && onState(mapState(st)); },
+    onMessage(err){ console.warn("星云SDK:", err); },
+    features: { auto_send_asr_to_llm: false, vad_merge_mode: true }
+  };
+  const a = new Ctor(opts);
+  return a.init ? a.init().then(() => a) : Promise.resolve(a);
+}
+
+async function init(){
+  try{ CASES = (await (await fetch("/api/redteam/cases")).json()).cases || []; }catch(e){ CASES = []; }
+  $("#sTotal").textContent = CASES.length;
+  const tb = $("#tbl tbody");
+  tb.innerHTML = CASES.map(c => `<tr id="row-${c.id}"><td><b>${c.id}</b></td><td>${escapeHtml(c.name)}
+      <div style="color:var(--dim);font-size:11.5px">${escapeHtml(c.expect.note||"")}</div></td>
+      <td>${escapeHtml(c.caliber)}</td><td><span class="tag" id="st-${c.id}">待跑</span></td>
+      <td id="ck-${c.id}" style="color:var(--dim)">—</td></tr>`).join("");
+
+  try{
+    const [s1, s2] = await Promise.all([
+      (await fetch("/api/session", {method:"POST"})).json(),
+      (await fetch("/api/session", {method:"POST"})).json()
+    ]);
+    SESS = s1;
+    const av = s1.avatar || {};
+    if (av.enabled && av.gateway_proxy){
+      const ok = await loadSdkOnce(s1.sdk_url);
+      const Ctor = window.XingyunAvatarAgent || window.XmovAvatar;
+      if (ok && Ctor){
+        try{
+          AGENT = await buildAgent(Ctor, "#stageA", av.gateway_proxy, s1.session_id);
+          RED   = await buildAgent(Ctor, "#stageR", av.gateway_proxy, s2.session_id);
+          chip($("#badge"), "双数字人已就绪", "ok");
+          // 注意：绝不能清空 stage 容器——SDK 的渲染节点就挂在里面（清了会把画面删掉）
+          document.querySelectorAll(".stage .ph").forEach(e => e.remove());
+        }catch(e){
+          chip($("#badge"), "数字人降级为文字版", "bad");
+          $("#stageA").textContent = "数字人未启动（文字版判定照常）";
+          $("#stageR").textContent = "数字人未启动（文字版判定照常）";
+        }
+      }
+    } else {
+      chip($("#badge"), "文字版（数字人未开放）", "");
+      $("#stageA").textContent = "文字版模式";
+      $("#stageR").textContent = "文字版模式";
+    }
+  }catch(e){ chip($("#badge"), "后端未响应", "bad"); }
+}
+
+// ---------------- 跑一条用例 ----------------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function runCase(c){
+  const sid = "rt-" + c.id + "-" + Date.now();
+  const turns = [];
+  chip($("#st-" + c.id), "运行中", "run");
+  $("#sNow").textContent = "正在跑：" + c.id + " " + c.name;
+
+  if (c.expect && c.expect.kill_switch){
+    // 一键停回归：服务端原子执行（开停用 → 走真实链路 → 恢复）
+    bubble("r", "红队客户", c.customer[0]);
+    try{ await RED.speak(c.customer[0]); }catch(e){}
+    await sleep(1500);
+    const d = await (await fetch("/api/redteam/kill-test", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({case_id:c.id, text:c.customer[0]})})).json();
+    (d.turns||[]).forEach(t => turns.push(t));
+    const a = (d.turns||[]).find(t => t.role === "agent");
+    if (a){ bubble("a", "AI 客服", a.text, renderWidgets(a.widgets)); try{ await AGENT.speak(a.text); }catch(e){} }
+  } else {
+    for (const line of c.customer){
+      bubble("r", "红队客户", line);
+      try{ await RED.speak(line); }catch(e){}
+      await sleep(1400);
+      let r;
+      try{
+        r = await (await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({text: line, session_id: sid})})).json();
+      }catch(e){ r = {text: "（后端错误）", sources: [], widgets: []}; }
+      bubble("a", "AI 客服", r.text, renderWidgets(r.widgets) + renderSources(r.sources));
+      turns.push({role:"customer", text: line});
+      turns.push({role:"agent", text: r.text, widgets: r.widgets || [], sources: r.sources || []});
+      try{ await AGENT.speak(r.text); }catch(e){}
+      const wait = Math.min(4200, 1200 + String(r.text||"").length * 55);
+      await sleep(wait);
+    }
+  }
+
+  const j = await (await fetch("/api/redteam/judge", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({case_id: c.id, turns})})).json();
+  RESULTS = RESULTS.filter(x => x.case_id !== c.id).concat([j]);
+  chip($("#st-" + c.id), j.pass ? "达标" : "不达标", j.pass ? "ok" : "bad");
+  $("#ck-" + c.id).innerHTML = (j.checks||[]).map(x =>
+    `<span style="color:${x.ok ? "var(--ok)" : "var(--bad)"}">${x.ok ? "✓" : "✗"} ${escapeHtml(x.name)}</span>`).join("　")
+    + `<div style="color:var(--dim);font-size:11.5px">${escapeHtml((j.checks||[]).find(x=>!x.ok)?.detail || "全部通过")}</div>`;
+  refreshSummary();
+  return j;
+}
+
+function refreshSummary(){
+  $("#sDone").textContent = RESULTS.length;
+  const ok = RESULTS.filter(r => r.pass).length;
+  $("#sOk").textContent = ok;
+  $("#sBad").textContent = RESULTS.length - ok;
+  const veto = RESULTS.filter(r => (r.caliber||"").includes("一票项"));
+  $("#sVeto").textContent = veto.filter(r => r.pass).length + "/" + (veto.length || 5);
+  $("#btnReport").disabled = RESULTS.length === 0;
+}
+
+async function runAll(list){
+  if (RUNNING) return;
+  RUNNING = true;
+  $("#btnRun").disabled = $("#btnVeto").disabled = true;
+  $("#logA").innerHTML = $("#logR").innerHTML = "";
+  try{
+    for (const c of list){
+      await runCase(c);
+      await sleep(500);
+    }
+    $("#sNow").textContent = "全部跑完 —— 可导出报告";
+  } finally {
+    RUNNING = false;
+    $("#btnRun").disabled = $("#btnVeto").disabled = false;
+  }
+}
+
+// ---------------- 报告 ----------------
+async function makeReport(){
+  const d = await (await fetch("/api/redteam/report", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({results: RESULTS})})).json();
+  $("#reportBox").style.display = "block";
+  $("#reportMd").textContent = d.markdown;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([d.markdown], {type:"text/markdown"}));
+  a.download = "AI客服合规红队测试报告.md";
+  a.click();
+}
+
+$("#btnRun").onclick = () => runAll(CASES);
+$("#btnVeto").onclick = () => runAll(CASES.filter(c => (c.caliber||"").includes("一票项")));
+$("#btnReport").onclick = makeReport;
+$("#btnKill").onclick = async () => {
+  const c = CASES.find(x => x.expect && x.expect.kill_switch) || CASES[CASES.length-1];
+  if (c) await runCase(c);
+  refreshSummary();
+};
+window.addEventListener("beforeunload", () => {
+  // 主动释放：离开页面即释放两路名额
+  try{ AGENT && AGENT.destroy && AGENT.destroy(); }catch(e){}
+  try{ RED && RED.destroy && RED.destroy(); }catch(e){}
+  [SESS && SESS.session_id].filter(Boolean).forEach(sid => {
+    navigator.sendBeacon && navigator.sendBeacon("/api/release",
+      new Blob([JSON.stringify({session_id: sid})], {type:"application/json"}));
+  });
+});
+init();
+</script>
+</body>
+</html>
