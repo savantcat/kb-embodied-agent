@@ -758,6 +758,8 @@ function releaseAvatar(why){
   bubble("bot", "本场数字人演示已结束（名额已释放）。文字问答 + 卡片交付继续可用。");
 }
 window.addEventListener("beforeunload", () => releaseAvatar("unload"));
+// 兜底：部分场景（后台/切走/页面隐藏）beforeunload 不触发，pagehide 更可靠
+window.addEventListener("pagehide", () => releaseAvatar("pagehide"));
 
 // ---------------------------------------------------------------- 画面区：放大 / 全屏 / 横竖屏
 let AV_ORIENT = "landscape";
