@@ -707,12 +707,10 @@ function loadSdk(url, av){
             const sub = $("#subtitle");
             if (sub) sub.textContent = (r.isFinal ? "🎙 听到：" : "🎙 正在听：") + r.text;
             if (r.isFinal){
-              micBanner(true, "🎙 已听到：<b>" + r.text + "</b> —— 正在作答…");
-              emb("ASR", "识别完成：" + r.text);
-              micAfterFinal();                            // 说完即关麦，避免回声
-              ask(ASR_TEXT, "voice");                     // 最终结果 → 走我方问答链路
+              asrSubmit(r.text);                          // 最终结果 → 走我方问答链路
             } else {
               emb("ASR", "识别中：" + r.text);
+              asrArm(1200);                               // 兜底：平台迟迟不给最终结果时也提交
             }
           },
           onAgentStateChange(st){ setState(mapSdkState(st)); },
@@ -899,7 +897,7 @@ async function say(text, opts){
 }
 
 // 语音输入（ASR）与客户端打断（interrupt）——评审点名要求的容错能力
-let MIC = { on: false }, ASR_TEXT = "", VOICE_LOOP = false;
+let MIC = { on: false }, ASR_TEXT = "", VOICE_LOOP = false, ASR_TIMER = 0, ASR_LAST_SENT = "";
 
 // 语音状态横幅：把「未授权 / 正在聆听 / 已听到」显式摆出来，杜绝"点了没反应"的观感
 function micBanner(show, html, isErr){
@@ -932,12 +930,15 @@ async function toggleMic(){
   }
   try{
     if (MIC.on){
+      // 手动结束本轮时，若刚说的话还没提交过，先把它发出去（别浪费这一句）
+      if (ASR_TEXT && ASR_TEXT !== ASR_LAST_SENT){ asrSubmit(ASR_TEXT); return; }
       await AGENT.stopASR(); micReset(); setState("Listen");
       micBanner(true, "🎙 已结束本轮聆听。点「🎤 语音输入」或进入全屏继续说话。");
       emb("Listen", "关闭麦克风");
     } else {
       setState("Listen"); emb("Listen", "开启麦克风，进入聆听");
       micBanner(true, "🎙 正在聆听…说完会自动回答（识别文本先经我方知识库与工具，再回给数字人播报）");
+      ASR_TEXT = ""; ASR_LAST_SENT = "";          // 新一轮，清空上一轮的文本
       await AGENT.startASR();
       MIC.on = true; btn.textContent = "⏹ 结束录音";
       startMicMeter();                    // 电平表：说话时该条必须动，不动就是麦克风没采到
@@ -956,6 +957,23 @@ async function toggleMic(){
 // 说完一句就关麦（避免数字人自己的声音被再次收进去），播报结束后按需自动重新开麦
 function micAfterFinal(){
   try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
+}
+// 把识别到的整句提交给问答链路。
+// 注意：这里原来调用的是一个不存在的函数 ask()，导致「识别成功但永远发不出去」——语音提问一直没生效。
+function asrSubmit(text){
+  const t = String(text || ASR_TEXT || "").trim();
+  clearTimeout(ASR_TIMER); ASR_TIMER = 0;
+  if (!t || t === ASR_LAST_SENT) return;
+  ASR_LAST_SENT = t;
+  try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
+  micBanner(true, "🎙 已听到：<b>" + t + "</b> —— 正在作答…");
+  emb("ASR", "提交提问：" + t);
+  send(t);
+}
+// 兜底：识别若一直不给最终结果（VAD 不收敛），静默 1.2 秒后也按当前文本提交
+function asrArm(ms){
+  clearTimeout(ASR_TIMER);
+  ASR_TIMER = setTimeout(() => asrSubmit(ASR_TEXT), ms || 1200);
 }
 
 // ---- 麦克风电平表：独立采一路音频做可视化。说话时电平必须动；不动=麦克风没采到声音 ----
@@ -1026,7 +1044,13 @@ function doInterrupt(){
 
 async function send(text){
   text = (text || $("#input").value).trim();
-  if (!text || BUSY) return;
+  if (!text) return;
+  // BUSY 时原来直接 return，等于把用户的提问静默吞掉；现在给出可见提示
+  if (BUSY){
+    micBanner(true, "⏳ 上一句还在处理中，请稍候再说（或点「✋ 打断」停止当前播报）", true);
+    emb("Busy", "提交被跳过：上一句仍在处理中");
+    return;
+  }
   // 已转人工：这一句直接发给坐席（真人工会话），不再走 AI
   if (HANDOFF && (HANDOFF.status === "active" || HANDOFF.status === "closed")){
     $("#input").value = "";
