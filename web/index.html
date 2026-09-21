@@ -922,6 +922,14 @@ async function toggleMic(){
     bubble("bot", "语音输入需要数字人会话在线（当前是文字 + 卡片版）；麦克风由浏览器直接授权，不会上传到我们服务器以外的第三方。");
     return;
   }
+  // 前置检查：没有 E2E 通道时直接说清原因（否则只会抛 SDK 原文「Agent 尚未连接 E2E WebSocket」，看不懂）
+  const e2eOpen = !!(AGENT.e2eClient && AGENT.e2eClient.isOpen);
+  if (!e2eOpen){
+    micBanner(true, "🎤 <b>数字人未连接</b>（星云会话未就绪 / 名额被占 / 后端连不上星云）："
+      + "语音输入需要数字人实时通道 · <b onclick=\"location.reload()\">点这里重连</b>", true);
+    emb("VoiceMode", "E2E 未连接，语音输入不可用（提示重连）");
+    return;
+  }
   try{
     if (MIC.on){
       await AGENT.stopASR(); micReset(); setState("Listen");
