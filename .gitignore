@@ -16,3 +16,4 @@ kb/private/
 # 运行留痕（本地生成，不入库）
 logs/
 _regression_result.json
+.env.bak*
