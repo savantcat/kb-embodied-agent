@@ -10,13 +10,14 @@ BASE="${KB_BASE:-http://127.0.0.1:8080}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENVF="$DIR/.env"
 TOKEN="$(grep -E '^ADMIN_TOKEN=' "$ENVF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' | tr -d '\n')"
+cd "$DIR" || exit 1          # 必须先 cd：给 docker 传 MSYS 路径（/d/...）会解析失败
 
 echo "== 1/3 后端健康 =="
 curl -s -m 8 "$BASE/api/health" || { echo; echo "后端没起来（$BASE）：先 docker compose up -d"; exit 1; }
 echo
 
 echo "== 2/3 容器 → 星云平台连通性 =="
-docker compose -f "$DIR/docker-compose.yml" exec -T backend python - <<'PY'
+docker compose exec -T backend python - <<'PY'
 import socket, time
 ok = True
 for name, host in (("星云平台", "nebula-agent.xingyun3d.com"), ("百度(对照)", "www.baidu.com")):
