@@ -962,6 +962,13 @@ def _profile_update(sid: str, text: str) -> None:
     if m2 and "industry" not in pf:
         pf["industry"] = m2.group(1)
 TURN_HANDOFF = int(os.getenv("TURN_HANDOFF", "5"))   # 同一会话到第 N 轮仍未解决即转人工
+GUIDE_MAX = int(os.getenv("GUIDE_MAX", "2"))          # 同一会话最多「引导澄清」次数，超限才转人工
+SESS_GUIDE: dict = {}        # sid -> 已引导次数
+SESS_UNRESOLVED: dict = {}   # sid -> 连续"未靠知识库解决"的轮次（解决一次即清零）
+# 只有"客户主动要求人工/投诉"才建交接卡；把「转人工」当话题来问（哪些情况要转人工）不算请求。
+HANDOFF_REQ_KW = ("转人工", "转真人", "找人工", "要人工", "人工服务", "人工客服", "真人服务",
+                  "客服电话", "来个人", "叫个人", "不想跟机器", "不要机器人", "别让机器人", "要真人")
+HANDOFF_TOPIC_Q = re.compile(r"哪些|什么|怎么|如何|为什么|是否|要不要|需不需要|必须|要求|标准|规定|算不算|是不是")
 
 # 示例企业现状（演示用基线；某项不在表中即视为"满足"）：
 # 4 项不满足 + 5 项部分满足 = 9 项待整改，其中一票项 B21a / B21c 未满足 → 结论"不达标"。
@@ -1159,7 +1166,10 @@ async def chat(body: ChatIn) -> dict:
         w = call_tool("quote.calc", {"sku": "示例商品", "qty": 1})
         if w:
             widgets.append(w)
-    if any(k in text for k in ("转人工", "人工", "客服电话", "投诉")):
+    # 客户主动要求人工 / 投诉 → 建交接卡；把「转人工」当话题来问（哪些情况要转人工）不算请求
+    _req_human = (any(k in text for k in HANDOFF_REQ_KW) and not HANDOFF_TOPIC_Q.search(text)) \
+        or ("投诉" in text)
+    if _req_human:
         w = call_tool("handoff.human", {"reason": "客户主动要求", "queue": "门店客服",
                                         "session_id": body.session_id, "question": text,
                                         "summary": "客户明确要求人工服务"})
@@ -1185,51 +1195,80 @@ async def chat(body: ChatIn) -> dict:
                 widgets.append(w)
             break
 
-    # 交互失败/超时阈值（B21a / B21e）：同一会话多轮仍未解决 → 转人工
-    SESS_TURNS[body.session_id] = SESS_TURNS.get(body.session_id, 0) + 1
-    if SESS_TURNS[body.session_id] >= TURN_HANDOFF and not any(w.type == "handoff" for w in widgets):
-        w = call_tool("handoff.human", {"reason": f"B21a/B21e 多轮（{SESS_TURNS[body.session_id]} 轮）仍未解决，转人工",
-                                        "queue": "人工坐席", "session_id": body.session_id,
-                                        "question": text, "summary": "连续多轮交互未达成结论，按失败阈值转人工",
-                                        "history": [{"role": "customer", "text": text}]})
-        if w:
-            widgets.append(w)
-
     hist = SESS_HISTORY.get(body.session_id, [])
     _profile_update(body.session_id, text)
+
+    # 第一层：知识库直答（关键词命中 → 语义兜底 → 参照会话记忆）
+    kb_hit = False
     if docs:
         answer = await _ask_llm(text, docs, hist, SESS_PROFILE.get(body.session_id))
+        kb_hit = bool(answer) and "NO_INFO" not in answer
     elif hist:
-        # 无检索结果但有会话记忆：允许据历史回答（体现"记得住、不用客户重复"）；
-        # 历史也答不上来时返回约定串 NO_INFO，走诚实转人工分支。
-        answer = await _ask_llm(text, [], hist, SESS_PROFILE.get(body.session_id),
-                                memory_ok=True)
-        if not answer or "NO_INFO" in answer:
-            answer = ""
+        # 无检索结果但有会话记忆：允许据历史回答（体现"记得住、不用客户重复"）
+        answer = await _ask_llm(text, [], hist, SESS_PROFILE.get(body.session_id), memory_ok=True)
+        kb_hit = bool(answer) and "NO_INFO" not in answer
     else:
         answer = await _ask_llm(text, [], hist, SESS_PROFILE.get(body.session_id))
-    handoff = False
-    if not docs and not widgets and not answer:
-        answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
-        w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席",
-                                        "session_id": body.session_id, "question": text, "sources": [],
-                                        "history": [{"role": "customer", "text": text}],
-                                        "summary": "知识库无对应依据，未编造，转人工处理"})
-        if w:
-            widgets.append(w)
-            handoff = True
+        kb_hit = bool(answer) and "NO_INFO" not in answer
+    if not kb_hit:
+        answer = ""   # 知识库没依据 → 交给第二层分诊，绝不硬编
+    route = "kb" if kb_hit else ""
+
+    # 第二层：意图分诊 ——「未命中」不等于「转人工」（国标并未要求随时转人工）
+    #   ANSWER 通用概念可讲清楚 → 直答；CLARIFY 信息不足 → 反问引导（≤GUIDE_MAX 次）；
+    #   GUIDE 闲聊 → 得体应一句并把话题拉回业务；HANDOFF 仅高风险/明确要人工/引导用尽。
+    if not answer and not any(w.type == "handoff" for w in widgets):
+        used = SESS_GUIDE.get(body.session_id, 0)
+        try:
+            action, t = await _triage(text, hist, used)
+        except Exception:
+            action, t = ("CLARIFY", "")
+        if action == "ANSWER" and t:
+            answer, route = t, "answer"
+        elif action in ("CLARIFY", "GUIDE") and t and used < GUIDE_MAX:
+            answer, route = t, action.lower()
+            SESS_GUIDE[body.session_id] = used + 1
+        else:
+            answer = (t if (action == "HANDOFF" and t) else
+                      "这个我需要请同事来跟您对接，我马上帮您转人工；您前面说过的话会一起带过去，不用重复。")
+            route = "handoff"
+            w = call_tool("handoff.human", {"reason": "引导后仍无法定位客户需求，转人工", "queue": "服务坐席",
+                                            "session_id": body.session_id, "question": text, "sources": [],
+                                            "history": [{"role": "customer", "text": text}],
+                                            "summary": "已走「引导澄清」流程，仍无法定位需求，转人工"})
+            if w:
+                widgets.append(w)
+
+    # 交互失败阈值（B21a / B21e）：只对"连续未靠知识库解决"的轮次计数——解决一次即清零。
+    # 原实现按会话总轮次计数，聊到第 5 句就无条件转人工（这就是"说啥都转人工"的隐藏元凶）。
+    if kb_hit:
+        SESS_UNRESOLVED[body.session_id] = 0
+        SESS_GUIDE[body.session_id] = 0
     else:
-        handoff = any(w.type == "handoff" for w in widgets)
+        n = SESS_UNRESOLVED.get(body.session_id, 0) + 1
+        SESS_UNRESOLVED[body.session_id] = n
+        SESS_TURNS[body.session_id] = SESS_TURNS.get(body.session_id, 0) + 1
+        if n > GUIDE_MAX and not any(w.type == "handoff" for w in widgets):
+            w = call_tool("handoff.human", {"reason": f"B21a/B21e 连续 {n} 轮仍未解决，转人工",
+                                            "queue": "人工坐席", "session_id": body.session_id,
+                                            "question": text, "summary": "连续多轮交互未达成结论，按失败阈值转人工",
+                                            "history": [{"role": "customer", "text": text}]})
+            if w:
+                widgets.append(w)
+    handoff = any(w.type == "handoff" for w in widgets)
+    if handoff:
+        route = "handoff"   # 路由标签以"是否真的转人工"为准（避免知识库口径掩盖转人工事实）
 
     # 兜底：任何路径都不允许返回空回答（数字人一声不吭是最糟的体验）
     if not answer:
         docs = []
-        answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
+        route = "handoff"
+        answer = "这个我需要请同事来跟您对接，我马上帮您转人工；您前面说过的话会一起带过去，不用重复。"
         if not any(w.type == "handoff" for w in widgets):
-            w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席",
+            w = call_tool("handoff.human", {"reason": "未取得可用依据，转人工", "queue": "服务坐席",
                                             "session_id": body.session_id, "question": text, "sources": [],
                                             "history": [{"role": "customer", "text": text}],
-                                            "summary": "知识库无对应依据，未编造，转人工处理"})
+                                            "summary": "未取得可用依据，转人工处理"})
             if w:
                 widgets.append(w)
         handoff = True
@@ -1248,11 +1287,15 @@ async def chat(body: ChatIn) -> dict:
     record_audit({
         "kind": "chat", "session_id": body.session_id, "text": text,
         "sources": [t for t, _a, _s in docs], "tools": [w.type for w in widgets],
-        "handoff": handoff, "llm": bool(LLM_API_KEY),
+        "handoff": handoff, "llm": bool(LLM_API_KEY), "route": route,
+        "guide_used": SESS_GUIDE.get(body.session_id, 0),
     })
 
     return {
         "text": answer,
+        # 路由：kb=知识库直答 / answer=通用据实作答 / clarify=反问引导 / guide=拉回业务 / handoff=转人工
+        "route": route,
+        "guide_used": SESS_GUIDE.get(body.session_id, 0),
         "sources": [t for t, _a, _s in docs],
         # 可审计引用：同时给出依据原文，前端可折叠查看
         "evidences": [{"src": s, "text": a} for _q, a, s in docs],
@@ -1308,6 +1351,46 @@ async def semantic_pick(text: str, top_k: int = 3) -> list[tuple[str, str, str]]
     return picked
 
 
+async def _triage(text: str, history: list[dict] | None, guide_used: int) -> tuple[str, str]:
+    """未命中知识库时的意图分诊（不是"一律转人工"）。
+
+    返回 (action, text)，action ∈ {ANSWER, CLARIFY, GUIDE, HANDOFF}：
+      ANSWER  —— 属于通用概念/常识，能在不编造企业内部事实的前提下讲清楚 → 直接答
+      CLARIFY —— 在我们业务范围内但信息不足/指代不清 → 只回一句反问，帮客户说出真实需求
+      GUIDE   —— 与业务无关的闲聊 → 得体应一句，再把话题引回我们能帮的方向
+      HANDOFF —— 仅限：投诉升级/法律纠纷/退款理赔/大额合同/身份核验，或客户明确要求人工
+    国标并未要求"随时转人工"；转人工是兜底，不是默认动作。
+    """
+    if not LLM_API_KEY:
+        return ("CLARIFY", "您具体想了解哪方面？比如国标自查、知识库怎么建、交付周期或报价，我直接给您讲。")
+    sys_p = (
+        "你是企业客服的意图分诊器。用户当前这句话没有命中企业知识库。你要选一个动作并给出回应正文。\n"
+        "动作定义：\n"
+        "ANSWER：这句话属于通用常识或概念解释，你能在不编造企业内部事实（价格、承诺、政策、数字）的前提下讲清楚。正文≤120字。\n"
+        "CLARIFY：话题在我们业务范围内，但信息不足、指代不清 → 只写一句反问，帮客户把真实需求说清楚。\n"
+        "GUIDE：与业务无关的闲聊或无关话题 → 先一句得体回应，再给 2-3 个我们能帮的具体方向，把话题引回业务。\n"
+        "HANDOFF：仅当涉及投诉升级、法律纠纷、退款理赔、大额合同、身份核验，或客户明确要求人工。\n"
+        "硬性要求：不编造企业内部事实；不承诺；不要用「我查不到、建议转人工」这类话结束闲聊（那是 GUIDE 该干的活）。\n"
+        "输出格式：第一行只写动作名（ANSWER / CLARIFY / GUIDE / HANDOFF），第二行起写正文。"
+    )
+    user_p = f"用户当前问题：{text}\n"
+    if history:
+        tail = " | ".join(f"{h.get('role')}:{str(h.get('content'))[:40]}" for h in history[-4:])
+        user_p += f"最近对话：{tail}\n"
+    user_p += (f"本会话已引导次数：{guide_used}/{GUIDE_MAX}。"
+               f"若已达上限仍无法定位客户需求，必须用 HANDOFF。")
+    out = await _llm_raw(sys_p, user_p, temperature=0.3)
+    if not out:
+        return ("CLARIFY", "您具体想了解哪方面？我按您说的直接讲。")
+    lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+    head = lines[0].strip().upper()
+    m = re.match(r"^(ANSWER|CLARIFY|GUIDE|HANDOFF)\b", head)
+    action = m.group(1) if m else "CLARIFY"
+    body = "\n".join(lines[1:]).strip() or out.strip()
+    record_audit({"kind": "triage", "query": text[:40], "action": action, "guide_used": guide_used})
+    return (action, body)
+
+
 async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
                    history: list[dict] | None = None, profile: dict | None = None,
                    memory_ok: bool = False) -> str:
@@ -1315,7 +1398,8 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
     if not LLM_API_KEY:
         return "（未配置 LLM_API_KEY，当前为本地骨架输出）" + (docs[0][1] if docs else "")
     ctx = "\n".join(f"[{t}·{s}] {a}" for t, a, s in docs) or "（无检索结果，不得编造）"
-    sys_prompt = ("你是企业门店的数字人员工。只依据提供的资料回答，资料不足就说不知道并建议转人工。"
+    sys_prompt = ("你是企业门店的数字人员工。只依据提供的资料回答；资料不足时只回四个字符：NO_INFO"
+                  "（不要编造、不要道歉、不要自行建议转人工——转不转人工由上层策略决定）。"
                   "回答口语化、简短，适合语音播报。")
     pf = profile or {}
     if pf.get("name"):
