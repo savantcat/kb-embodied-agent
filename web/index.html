@@ -376,9 +376,32 @@ async function demo6(){
   }catch(e){}
   DEMO_RUNNING = false;
 }
+// ?auto=9 → 只跑「智能引导」补拍段：未命中先引导，不滥用转人工
+async function demo9(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  try{
+    cap("补拍段 · 智能引导：答不上的先引导，不推给人工", "知识库没有依据时，它先得体回应并把话题拉回业务；信息说不清楚就反问一句，把真实需求问出来——而不是一句「转人工」把客户打发走。");
+    await dwait(2000);
+    await dask("今天天气怎么样？", 11000);
+    await dask("帮我看看这个", 11000);
+    cap("补拍段 · 智能引导", "只有客户明确要人工，或涉及投诉与高风险，它才转人工。");
+    await dwait(5000);
+  }catch(e){}
+  DEMO_RUNNING = false;
+}
 // ?auto=1 → 打开即自动开演（录制用：地址栏粘一次网址即可，不用找按钮）
 function autoDemoStart(){ try{ autoDemo(); }catch(e){} }
-if (location.search.indexOf("auto=6") >= 0){
+if (location.search.indexOf("auto=9") >= 0){
+  const t9 = setInterval(() => {
+    const b = document.getElementById("modeBadge");
+    if (b && b.textContent.indexOf("连接中") < 0){
+      clearInterval(t9);
+      setTimeout(() => { try{ demo9(); }catch(e){} }, 14000);
+    }
+  }, 1000);
+}
+else if (location.search.indexOf("auto=6") >= 0){
   setTimeout(() => { try{ demo6(); }catch(e){} }, 14000);
 }
 else if (location.search.indexOf("auto=1") >= 0){
