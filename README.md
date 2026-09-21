@@ -83,7 +83,8 @@ python scripts/dev_server.py --port 8080 --backend http://127.0.0.1:8011
 | 流式分段播报 | 按标点切分（单段 ≤60 字），逐段 `speak(ssml, is_start, is_end)` | 每次回答自动 |
 | 情绪表情 + 语调 | `speak(ssml, true, true, { emotion })`，按回答语义匹配（不达标→严肃、出卡片→开心、转人工→歉疚） | 每次回答自动 |
 | 关键动作（KA） | SSML `<ue4event><type>ka_intent</type>…` 注入（抓重点 KeyPoints / 指屏幕 Pointscreen / 问候 Hello / 致歉 Apologize） | 每次回答自动 |
-| 语音输入（ASR） | `startASR()` / `stopASR()`，`features.auto_send_asr_to_llm=false` —— **识别文本交回我方 Agent**（RAG + 工具），不经过平台大脑 | 「🎤 语音输入」按钮 |
+| 语音输入（ASR） | `startASR()` / `stopASR()`，`features.auto_send_asr_to_llm=false` —— **识别文本交回我方 Agent**（RAG + 工具），不经过平台大脑；识别中间结果实时上屏，说完自动关麦（避免把数字人自己的声音再收进去） | 「🎤 语音输入」按钮 |
+| 语音对话模式 | 进入**全屏**即自动开启聆听，数字人答完自动回听，形成「你说 → 它答 → 你再说」的轮次对话；退出全屏自动关麦。适老化模式下同样自动进入语音优先 | 「⛶ 全屏」按钮 / 「👵 适老化」按钮 |
 | 客户端打断 | `interrupt('user_click')` 立即打断播报并回到聆听姿态 | 「✋ 打断」按钮 |
 | 具身状态协同 | SDK 状态机（running / speaking / listening）与本页 Listen / Think / Speak 三态及字幕联动 | 自动 |
 

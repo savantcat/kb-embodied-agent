@@ -93,6 +93,9 @@
 .humanbanner{display:none;margin:8px 0 0;padding:9px 12px;border:1px solid #1e3a5f;background:#0f1c2e;color:#93c5fd;border-radius:8px;font-size:12.5px}
 .humanbanner.on{display:block}
 .netbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #5a4520;background:#241d0f;color:#f59e0b;border-radius:8px;font-size:12.5px}
+.micbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #1e4d3a;background:#0f241c;color:#34d399;border-radius:8px;font-size:12.5px}
+.micbanner.err{border-color:#7f1d1d;background:#241010;color:#fca5a5}
+.micbanner b{text-decoration:underline;cursor:pointer}
 .embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden;flex:1 1 auto;min-height:0}
 .embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
 .embody .elog{max-height:132px;overflow:auto;padding:6px 11px;font:12px/1.7 Consolas,Menlo,monospace}
@@ -157,6 +160,8 @@ body.a11y :root{--dim:#c9d1d9}
     </div>
     <div class="humanbanner" id="humanBanner"></div>
     <div class="netbanner" id="netBanner">🌐 弱网演练中：数字人已降级为文字 + 卡片版；网络恢复后自动重连</div>
+    <!-- 语音输入状态横幅：麦克风未授权/正在聆听都显式摆出来，避免"点了没反应"的观感 -->
+    <div class="micbanner" id="micBanner"></div>
     <!-- 具身状态看板：六类具身能力与对话事件的实时绑定（证明不是「文本框 + 形象」） -->
     <div class="embody">
       <div class="ehd">🎭 具身状态绑定（实时）
@@ -208,6 +213,9 @@ document.getElementById("btnA11y").onclick = function(){
   document.getElementById("log").setAttribute("aria-live", "polite");
   say("已切换到" + (on ? "适老化无障碍模式，字更大、对比更强。" : "标准显示模式。"));
   emb("A11y", on ? "开启：大字号 + 高对比 + 字幕常驻 + 语音优先" : "关闭");
+  // 语音优先：开启适老化时真去开麦（不会打字的用户应当直接说话）
+  if (on && AGENT && !MIC.on) setTimeout(() => { if (!MIC.on) toggleMic(); }, 400);
+  else if (!on && MIC.on) toggleMic();
 };
 
 // ---- 弱网 / 断网：降级 + 自动重连 ----
@@ -667,7 +675,11 @@ function loadSdk(url, av){
         },
         onVoiceStateChange(st){
           if (st === "start") setState("Speak");
-          else if (st === "end") setState("Listen");
+          else if (st === "end"){
+            setState("Listen");
+            // 全屏语音对话模式：数字人说完自动重新开麦，形成「你说 → 它答 → 你再说」的轮次
+            if (VOICE_LOOP && !MIC.on) setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 500);
+          }
         },
         onMessage(err){ console.warn("星云 SDK:", err); },
         // 功能开关：ASR 识别结果不自动送平台大脑 —— 交回我方 Agent（RAG + 工具）处理
@@ -678,10 +690,29 @@ function loadSdk(url, av){
           onASRResult(r){
             if (!r || !r.text) return;
             ASR_TEXT = r.text;
-            if (r.isFinal) ask(ASR_TEXT, "voice");      // 最终结果 → 走我方问答链路
+            // 中间结果实时上屏（isFinal:false 会连续来多条），让「在听」这件事看得见
+            const sub = $("#subtitle");
+            if (sub) sub.textContent = (r.isFinal ? "🎙 听到：" : "🎙 正在听：") + r.text;
+            if (r.isFinal){
+              micBanner(true, "🎙 已听到：<b>" + r.text + "</b> —— 正在作答…");
+              emb("ASR", "识别完成：" + r.text);
+              micAfterFinal();                            // 说完即关麦，避免回声
+              ask(ASR_TEXT, "voice");                     // 最终结果 → 走我方问答链路
+            } else {
+              emb("ASR", "识别中：" + r.text);
+            }
           },
           onAgentStateChange(st){ setState(mapSdkState(st)); },
-          onError(err){ console.warn("星云 Agent:", err); }
+          onError(err){
+            console.warn("星云 Agent:", err);
+            try{
+              const dom = (err && err.domain) || "", code = (err && err.code) || "";
+              if (dom === "permission" || /MICROPHONE|ASR/i.test(String(code))){
+                micReset();
+                micBanner(true, "🎤 麦克风/识别异常（" + (code || dom) + "）：请在浏览器里允许麦克风 · <b onclick=\"micRetry()\">点这里重试</b>", true);
+              }
+            }catch(e){}
+          }
         }
       };
       if (av && av.gateway_proxy){
@@ -784,13 +815,25 @@ function initViewUI(){
     const box = $("#avatar");
     try{
       if (document.fullscreenElement) await document.exitFullscreen();
-      else await box.requestFullscreen();
+      else {
+        await box.requestFullscreen();
+        // 全屏 = 语音对话模式：自动开麦，数字人答完自动回听（轮次对话）
+        VOICE_LOOP = true;
+        emb("VoiceMode", "全屏 → 语音对话模式（自动开启麦克风）");
+        setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 600);
+      }
       setTimeout(() => { try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){} }, 300);
     }catch(e){ bubble("bot", "全屏被浏览器拒绝（" + ((e && e.message) || e) + "），可直接放大浏览器窗口。"); }
   };
   orient.onclick = () => { setAvatarView(AV_ORIENT === "landscape" ? "portrait" : "landscape"); };
   document.addEventListener("fullscreenchange", () => {
     try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){}
+    if (!document.fullscreenElement){
+      // 退出全屏：结束语音对话模式并关麦
+      VOICE_LOOP = false;
+      if (MIC.on){ try{ AGENT && AGENT.stopASR && AGENT.stopASR(); }catch(e){} micReset(); }
+      micBanner(false);
+    }
   });
 }
 
@@ -841,24 +884,53 @@ async function say(text, opts){
 }
 
 // 语音输入（ASR）与客户端打断（interrupt）——评审点名要求的容错能力
-let MIC = { on: false }, ASR_TEXT = "";
+let MIC = { on: false }, ASR_TEXT = "", VOICE_LOOP = false;
+
+// 语音状态横幅：把「未授权 / 正在聆听 / 已听到」显式摆出来，杜绝"点了没反应"的观感
+function micBanner(show, html, isErr){
+  const el = $("#micBanner"); if (!el) return;
+  el.className = "micbanner" + (isErr ? " err" : "");
+  el.style.display = show ? "block" : "none";
+  if (html != null) el.innerHTML = html;
+}
+function micReset(){
+  MIC.on = false;
+  const b = $("#btnMic"); if (b) b.textContent = "🎤 语音输入";
+}
+function micRetry(){ micBanner(false); toggleMic(); }
+
 async function toggleMic(){
   const btn = $("#btnMic");
   if (!(AGENT && typeof AGENT.startASR === "function")){
+    micBanner(true, "🎤 语音输入需要数字人会话在线（当前是文字 + 卡片版）。", true);
     bubble("bot", "语音输入需要数字人会话在线（当前是文字 + 卡片版）；麦克风由浏览器直接授权，不会上传到我们服务器以外的第三方。");
     return;
   }
   try{
     if (MIC.on){
-      await AGENT.stopASR(); MIC.on = false; btn.textContent = "🎤 语音输入"; setState("Listen");
+      await AGENT.stopASR(); micReset(); setState("Listen");
+      micBanner(true, "🎙 已结束本轮聆听。点「🎤 语音输入」或进入全屏继续说话。");
+      emb("Listen", "关闭麦克风");
     } else {
       setState("Listen"); emb("Listen", "开启麦克风，进入聆听");
-      await AGENT.startASR(); MIC.on = true; btn.textContent = "⏹ 结束录音";
+      micBanner(true, "🎙 正在聆听…说完会自动回答（识别文本先经我方知识库与工具，再回给数字人播报）");
+      await AGENT.startASR();
+      MIC.on = true; btn.textContent = "⏹ 结束录音";
       bubble("bot", "请说话，说完我会直接回答（识别文本会先经过我方知识库与工具，再回给数字人播报）。");
     }
   }catch(e){
-    bubble("bot", "麦克风启动失败（" + ((e && e.message) || e) + "）。请在浏览器里允许麦克风权限后重试。");
+    micReset();
+    const msg = (e && e.message) || String(e || "未知错误");
+    const denied = /denied|permission|not allowed/i.test(msg);
+    micBanner(true, denied
+      ? "🎤 <b>麦克风未授权</b>：请点浏览器地址栏左侧的权限图标 → 把「麦克风」改为允许，然后 <b onclick=\"micRetry()\">点这里重试</b>。"
+      : "🎤 麦克风启动失败（" + msg + "）· <b onclick=\"micRetry()\">点这里重试</b>", true);
+    bubble("bot", "麦克风启动失败（" + msg + "）。请在浏览器里允许麦克风权限后重试。");
   }
+}
+// 说完一句就关麦（避免数字人自己的声音被再次收进去），播报结束后按需自动重新开麦
+function micAfterFinal(){
+  try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
 }
 function doInterrupt(){
   if (AGENT && typeof AGENT.interrupt === "function"){

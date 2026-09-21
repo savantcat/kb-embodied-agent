@@ -775,6 +775,19 @@ async def xmov_gateway_proxy(path: str, request: Request) -> dict:
     if isinstance(out, dict) and out.get("error_code") not in (0, None):
         record_audit({"kind": "xmov-proxy-denied", "error_code": out.get("error_code"),
                       "reason": str(out.get("error_reason"))[:40]})
+    # 诊断用：只记录字段名结构（不含任何密钥值），用于判断平台是否下发 E2E 音频通道
+    try:
+        data = out.get("data") if isinstance(out, dict) else None
+        data = data if isinstance(data, dict) else {}
+        record_audit({"kind": "xmov-session-probe",
+                      "req_keys": sorted(list(body.keys()))[:12] if isinstance(body, dict) else [],
+                      "top_keys": sorted(list(out.keys()))[:12] if isinstance(out, dict) else [],
+                      "data_keys": sorted(list(data.keys()))[:20],
+                      "has_e2e_resp": bool(data.get("e2e_resp")),
+                      "e2e_keys": sorted(list((data.get("e2e_resp") or {}).keys()))[:8]
+                      if isinstance(data.get("e2e_resp"), dict) else []})
+    except Exception:
+        pass
     return out
 
 
