@@ -96,6 +96,14 @@
 .micbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #1e4d3a;background:#0f241c;color:#34d399;border-radius:8px;font-size:12.5px}
 .micbanner.err{border-color:#7f1d1d;background:#241010;color:#fca5a5}
 .micbanner b{text-decoration:underline;cursor:pointer}
+/* 麦克风电平：说话时这条要动；不动说明麦克风压根没采到声音（设备/权限问题，不是识别问题） */
+.miclevel{display:none;align-items:center;gap:8px;margin:6px 0 0;font-size:11.5px;color:#666}
+.miclevel i{display:block;height:8px;width:0;background:linear-gradient(90deg,#34d399,#fbbf24,#ef4444);border-radius:4px;transition:width .08s linear}
+.miclevel .track{flex:1;height:8px;background:#e6e8ec;border-radius:4px;overflow:hidden}
+/* 全屏：让整个画面区（含按钮、横幅、字幕）都进全屏，否则全屏后什么都点不到 */
+.stage:fullscreen{background:#0b0f14;padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto}
+.stage:fullscreen .avatar{height:min(58vh,600px);border-radius:12px}
+.stage:fullscreen .subtitle{font-size:15px}
 .embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden;flex:1 1 auto;min-height:0}
 .embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
 .embody .elog{max-height:132px;overflow:auto;padding:6px 11px;font:12px/1.7 Consolas,Menlo,monospace}
@@ -162,6 +170,11 @@ body.a11y :root{--dim:#c9d1d9}
     <div class="netbanner" id="netBanner">🌐 弱网演练中：数字人已降级为文字 + 卡片版；网络恢复后自动重连</div>
     <!-- 语音输入状态横幅：麦克风未授权/正在聆听都显式摆出来，避免"点了没反应"的观感 -->
     <div class="micbanner" id="micBanner"></div>
+    <div class="miclevel" id="micLevel">
+      <span>🎙 麦克风电平</span>
+      <span class="track"><i id="micLevelBar"></i></span>
+      <span id="micLevelHint">未开启</span>
+    </div>
     <!-- 具身状态看板：六类具身能力与对话事件的实时绑定（证明不是「文本框 + 形象」） -->
     <div class="embody">
       <div class="ehd">🎭 具身状态绑定（实时）
@@ -812,7 +825,8 @@ function initViewUI(){
   const full = $("#btnFull"), orient = $("#btnOrient");
   if (!full || !orient) return;
   full.onclick = async () => {
-    const box = $("#avatar");
+    // 全屏目标 = 整个画面区（含按钮/横幅/字幕/电平表）；只全屏 #avatar 会导致全屏后什么控件都点不到
+    const box = document.querySelector("section.stage") || $("#avatar");
     try{
       if (document.fullscreenElement) await document.exitFullscreen();
       else {
@@ -820,6 +834,7 @@ function initViewUI(){
         // 全屏 = 语音对话模式：自动开麦，数字人答完自动回听（轮次对话）
         VOICE_LOOP = true;
         emb("VoiceMode", "全屏 → 语音对话模式（自动开启麦克风）");
+        micBanner(true, "🎙 语音对话模式：正在开启麦克风…（若浏览器询问权限请点「允许」）");
         setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 600);
       }
       setTimeout(() => { try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){} }, 300);
@@ -896,6 +911,7 @@ function micBanner(show, html, isErr){
 function micReset(){
   MIC.on = false;
   const b = $("#btnMic"); if (b) b.textContent = "🎤 语音输入";
+  try{ stopMicMeter(); }catch(e){}
 }
 function micRetry(){ micBanner(false); toggleMic(); }
 
@@ -916,6 +932,7 @@ async function toggleMic(){
       micBanner(true, "🎙 正在聆听…说完会自动回答（识别文本先经我方知识库与工具，再回给数字人播报）");
       await AGENT.startASR();
       MIC.on = true; btn.textContent = "⏹ 结束录音";
+      startMicMeter();                    // 电平表：说话时该条必须动，不动就是麦克风没采到
       bubble("bot", "请说话，说完我会直接回答（识别文本会先经过我方知识库与工具，再回给数字人播报）。");
     }
   }catch(e){
@@ -931,6 +948,60 @@ async function toggleMic(){
 // 说完一句就关麦（避免数字人自己的声音被再次收进去），播报结束后按需自动重新开麦
 function micAfterFinal(){
   try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
+}
+
+// ---- 麦克风电平表：独立采一路音频做可视化。说话时电平必须动；不动=麦克风没采到声音 ----
+let MIC_METER = { stream: null, ctx: null, raf: 0, analyser: null, data: null };
+async function startMicMeter(){
+  const box = $("#micLevel"), bar = $("#micLevelBar"), hint = $("#micLevelHint");
+  if (!box || MIC_METER.stream) return;
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({audio: true});
+    MIC_METER.stream = s;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    MIC_METER.ctx = new Ctx();
+    const src = MIC_METER.ctx.createMediaStreamSource(s);
+    MIC_METER.analyser = MIC_METER.ctx.createAnalyser();
+    MIC_METER.analyser.fftSize = 512;
+    MIC_METER.data = new Uint8Array(MIC_METER.analyser.fftSize);
+    src.connect(MIC_METER.analyser);
+    box.style.display = "flex";
+    let peak = 0, t0 = Date.now();
+    const tick = () => {
+      if (!MIC_METER.analyser) return;
+      MIC_METER.analyser.getByteTimeDomainData(MIC_METER.data);
+      let sum = 0;
+      for (let i = 0; i < MIC_METER.data.length; i++){ const v = (MIC_METER.data[i] - 128) / 128; sum += v * v; }
+      const rms = Math.sqrt(sum / MIC_METER.data.length);
+      const level = Math.min(100, Math.round(rms * 320));
+      peak = Math.max(peak * 0.94, level);
+      if (bar) bar.style.width = peak + "%";
+      if (hint){
+        if (peak > 4){ hint.textContent = "有声 ✓"; t0 = Date.now(); }
+        else {
+          const secs = Math.round((Date.now() - t0) / 1000);
+          hint.textContent = secs >= 6
+            ? "没采到声音（已 " + secs + " 秒）：请检查系统默认麦克风设备（设置→系统→声音→输入）"
+            : "没采到声音";
+        }
+      }
+      MIC_METER.raf = requestAnimationFrame(tick);
+    };
+    tick();
+    emb("MicLevel", "电平表已启动（说话时该条应随声音变化）");
+  }catch(e){
+    if (box) box.style.display = "flex";
+    if (hint) hint.textContent = "电平表启动失败：" + ((e && e.message) || e);
+  }
+}
+function stopMicMeter(){
+  try{ if (MIC_METER.raf) cancelAnimationFrame(MIC_METER.raf); }catch(e){}
+  try{ if (MIC_METER.stream) MIC_METER.stream.getTracks().forEach(t => t.stop()); }catch(e){}
+  try{ if (MIC_METER.ctx) MIC_METER.ctx.close(); }catch(e){}
+  MIC_METER = { stream: null, ctx: null, raf: 0, analyser: null, data: null };
+  const bar = $("#micLevelBar"), hint = $("#micLevelHint");
+  if (bar) bar.style.width = "0%";
+  if (hint) hint.textContent = "未开启";
 }
 function doInterrupt(){
   if (AGENT && typeof AGENT.interrupt === "function"){
