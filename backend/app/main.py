@@ -1142,6 +1142,12 @@ async def chat(body: ChatIn) -> dict:
         }
 
     docs = retrieve(text)
+    if not docs:
+        # 关键词检索落空 → 语义兜底（让模型在知识库条目里挑编号；挑不出才走转人工）
+        try:
+            docs = await semantic_pick(text)
+        except Exception:
+            docs = []
     widgets: list[Widget] = []
 
     # 行动层触发（真实项目由 LLM function-calling 决策，这里用规则桩演示链路）
@@ -1215,6 +1221,19 @@ async def chat(body: ChatIn) -> dict:
     else:
         handoff = any(w.type == "handoff" for w in widgets)
 
+    # 兜底：任何路径都不允许返回空回答（数字人一声不吭是最糟的体验）
+    if not answer:
+        docs = []
+        answer = "这个问题我这边暂时没有依据，我先帮您转人工，稍后会有同事跟进，可以吗？"
+        if not any(w.type == "handoff" for w in widgets):
+            w = call_tool("handoff.human", {"reason": "知识库未命中，主动转人工", "queue": "服务坐席",
+                                            "session_id": body.session_id, "question": text, "sources": [],
+                                            "history": [{"role": "customer", "text": text}],
+                                            "summary": "知识库无对应依据，未编造，转人工处理"})
+            if w:
+                widgets.append(w)
+        handoff = True
+
     # 命中转人工 → 落真实工单（坐席台可接入、可对话），工单号回填到交接卡
     for w in widgets:
         if w.type == "handoff":
@@ -1244,6 +1263,49 @@ async def chat(body: ChatIn) -> dict:
                    "profile": SESS_PROFILE.get(body.session_id, {})},
         "logged": True,
     }
+
+
+async def _llm_raw(sys_prompt: str, user_prompt: str, temperature: float = 0.0) -> str:
+    """最小 LLM 调用（供检索判定等内部环节使用，不走 RAG 提示词）。"""
+    if not LLM_API_KEY:
+        return ""
+    payload = {"model": LLM_MODEL, "temperature": temperature,
+               "messages": [{"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": user_prompt}]}
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.post(
+            f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"}, json=payload)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
+async def semantic_pick(text: str, top_k: int = 3) -> list[tuple[str, str, str]]:
+    """关键词检索落空时的语义兜底。
+
+    只让模型在「知识库条目清单」里挑编号，不回答、不编造：挑不出就返回空，
+    由调用方走「不知道 + 转人工」。既提高口语问法命中率，又不破坏「无依据不说」。
+    """
+    if not LLM_API_KEY or not CORPUS:
+        return []
+    idx = "\n".join("%d. %s" % (i + 1, e["q"]) for i, e in enumerate(CORPUS))
+    out = await _llm_raw(
+        "你是检索助手。只做选择，不回答、不解释、不编造。",
+        "企业知识库条目清单：\n%s\n\n用户问题：%s\n\n"
+        "只输出能回答该问题的条目编号（1~3 个，英文逗号分隔）；"
+        "没有任何条目能回答就只输出 NO。除编号或 NO 外不要输出任何内容。" % (idx, text))
+    if not out or out.upper().lstrip().startswith("NO"):
+        return []
+    picked: list[tuple[str, str, str]] = []
+    for m in re.findall(r"\d+", out)[:top_k]:
+        i = int(m) - 1
+        if 0 <= i < len(CORPUS):
+            e = CORPUS[i]
+            picked.append((e["q"], e["a"], e["src"]))
+    if picked:
+        record_audit({"kind": "rag-semantic-pick", "query": text[:40],
+                      "picked": [p[0][:24] for p in picked]})
+    return picked
 
 
 async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
