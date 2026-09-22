@@ -1,10 +1,23 @@
 services:
   backend:
     build: ./backend
-    env_file: .env
+    # ⚠️ 不要写 `env_file: .env`：.env 已在 .gitignore 中，评审 clone 出来的目录里
+    # 没有这个文件，docker compose 会直接报 "env file .env not found" 而拒绝启动。
+    # 下面用 ${VAR:-默认值} 形式：Compose 本来就会读取同目录 .env 做变量插值，
+    # 因此「配了 .env 就生效、没配也能一键跑起来（离线演示模式）」。
     environment:
       - KB_PATH=/kb
-      - DEMO_MODE=${DEMO_MODE:-online}
+      - DEMO_MODE=${DEMO_MODE:-offline}
+      - XMOV_APP_ID=${XMOV_APP_ID:-}
+      - XMOV_APP_SECRET=${XMOV_APP_SECRET:-}
+      - XMOV_GATEWAY=${XMOV_GATEWAY:-https://nebula-agent.xingyun3d.com/user/v1/ttsa_v2/session}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - SESSION_TTL_SECONDS=${SESSION_TTL_SECONDS:-900}
+      - AVATAR_DEFAULT=${AVATAR_DEFAULT:-off}
+      - AVATAR_CONCURRENCY=${AVATAR_CONCURRENCY:-3}
     volumes:
       - ./kb:/kb:ro
     restart: unless-stopped

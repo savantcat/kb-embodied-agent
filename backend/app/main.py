@@ -338,7 +338,13 @@ def release_avatar(body: ReleaseIn) -> dict:
 @app.get("/api/stats")
 def public_stats() -> dict:
     """给前端展示的公开口径（不含任何密钥）。"""
-    return {"avatar_enabled": AVATAR["enabled"], "avatar_reason": AVATAR["reason"],
+    # 口径：avatar_enabled = 后台开关的配置值；avatar_enabled_effective = 当前是否真的可用。
+    # 离线模式或缺凭证时 /api/session 不会下发数字人凭证，若只报配置值，
+    # 同一个事实会出现两个答案（评审对照 /api/stats 与 /api/session 即可发现）。
+    effective = (bool(AVATAR["enabled"]) and DEMO_MODE != "offline"
+                 and bool(APP_ID and APP_SECRET))
+    return {"avatar_enabled": AVATAR["enabled"], "avatar_enabled_effective": effective,
+            "demo_mode": DEMO_MODE, "avatar_reason": AVATAR["reason"],
             "slot_busy": _slot_busy(), "concurrency": AVATAR_CONCURRENCY,
             "busy_now": _busy_count(), "day_sessions": DAY["sessions"],
             "day_session_cap": AVATAR_DAILY_SESSIONS, "day_points": _points_used(),
@@ -514,7 +520,8 @@ async def redteam_run_all(save: bool = True) -> dict:
     md = rt.report(results)
     if save:
         try:
-            outp = Path("docs/合规红队测试报告.md")
+            # 按模块定位仓库根 docs/：从 backend/ 启动时 cwd 会让报告落到 backend/docs/（不受版本控制）
+            outp = Path(__file__).resolve().parents[2] / "docs" / "合规红队测试报告.md"
             outp.parent.mkdir(parents=True, exist_ok=True)
             outp.write_text(md, encoding="utf-8")
         except Exception:
@@ -965,10 +972,34 @@ TURN_HANDOFF = int(os.getenv("TURN_HANDOFF", "5"))   # 同一会话到第 N 轮�
 GUIDE_MAX = int(os.getenv("GUIDE_MAX", "2"))          # 同一会话最多「引导澄清」次数，超限才转人工
 SESS_GUIDE: dict = {}        # sid -> 已引导次数
 SESS_UNRESOLVED: dict = {}   # sid -> 连续"未靠知识库解决"的轮次（解决一次即清零）
+SESS_SOURCES: dict = {}      # sid -> 最近一次检索到的依据（离线演示复用，避免无依据作答）
+OFFLINE_UNRESOLVED_LIMIT = 3  # 离线模式：连续 N 轮答不上来即转人工（对齐一票项交互失败阈值）
 # 只有"客户主动要求人工/投诉"才建交接卡；把「转人工」当话题来问（哪些情况要转人工）不算请求。
 HANDOFF_REQ_KW = ("转人工", "转真人", "找人工", "要人工", "人工服务", "人工客服", "真人服务",
                   "客服电话", "来个人", "叫个人", "不想跟机器", "不要机器人", "别让机器人", "要真人")
 HANDOFF_TOPIC_Q = re.compile(r"哪些|什么|怎么|如何|为什么|是否|要不要|需不需要|必须|要求|标准|规定|算不算|是不是")
+
+# 离线模式的风险兜底规则（与在线路径 VETO_RULES 同一口径）。
+# 离线演示同样要能演全「风险识别 → 转人工 → 建单」链路：评审最可能用离线模式复现，
+# 离线看不到的能力等于没有。
+OFFLINE_VETO_RULES = (
+    (("身份证", "银行卡", "密码", "验证码", "转账", "支付信息"),
+     "B21c 对话涉及信息安全，转人工处理", "客户问题涉及敏感信息，转人工核验"),
+    (("过敏", "发烧", "受伤", "急救", "出事了", "有危险", "报警"),
+     "B21d 涉及人身/财产安全，立即转人工", "客户反馈人身或财产安全风险，立即转人工"),
+    (("不想跟机器", "不要机器人", "别让机器人", "叫个人", "要真人", "转真人", "真人服务"),
+     "B21b 客户明确拒绝智能客服，立即转人工", "客户拒绝由 AI 应答，直接转人工"),
+    (("投诉", "诈骗", "起诉", "律师", "法律纠纷"),
+     "投诉/法律纠纷升级，转人工并留痕", "客户提出投诉或法律诉求，升级人工处理"),
+    (("私人手机号", "老板的电话", "员工名单", "内部名单", "内部资料", "未公开"),
+     "B8 无依据信息不得编造，转人工核实", "客户索取无公开依据的信息，不编造、转人工"),
+)
+# 「转人工」话题提问的离线答复（问规则 ≠ 要求转人工，不建单、不误判为转人工）
+HANDOFF_TOPIC_ANSWER = (
+    "这几种情况我们会直接转人工，不让 AI 硬答：客户明确要求人工、投诉与法律纠纷、"
+    "退款理赔与大额合同、涉及身份核验或个人信息。转接时会把上下文一并交接，"
+    "客户不用重复描述一遍，也不会被丢回机器人。"
+)
 
 # 示例企业现状（演示用基线；某项不在表中即视为"满足"）：
 # 4 项不满足 + 5 项部分满足 = 9 项待整改，其中一票项 B21a / B21c 未满足 → 结论"不达标"。
@@ -1115,7 +1146,7 @@ async def chat(body: ChatIn) -> dict:
         raise HTTPException(400, "text 不能为空")
 
     if DEMO_MODE == "offline":
-        return _offline_reply(text)
+        return _offline_reply(text, body.session_id)
 
     # 人工接管中：AI 暂停应答，请求直接落到人工工单（客户页会看到"人工接管中"）
     tid_now = TAKEOVER.get(body.session_id)
@@ -1430,14 +1461,81 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
         return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def _offline_reply(text: str) -> dict:
-    """离线演示：预置脚本，用于评审体验与无网络/无积分场景（D3）。"""
+def _offline_reply(text: str, sid: str = "") -> dict:
+    """离线演示：规则桩 + 预置脚本（无密钥 / 无网络 / 无积分场景也能演全能力类型）。
+
+    与在线路径同一套口径：风险兜底 → 转人工建单 → 留痕 → 记忆 → 熔断 / 人工接管；
+    差别只在「生成」这一环用规则与预置脚本替代大模型（响应里如实标注 mode=offline）。
+    """
+    def _finish(reply: str, route: str, widgets=None, src=None, mode: str = "offline") -> dict:
+        ws = [w.model_dump() for w in (widgets or [])]
+        if src is None:
+            src = [x[0] for x in retrieve(text, 2)] or SESS_SOURCES.get(sid, [])
+        if src:
+            SESS_SOURCES[sid] = src
+        if sid:
+            _remember(sid, "user", text)
+            _remember(sid, "assistant", reply)
+            _profile_update(sid, text)
+        record_audit({"kind": "chat", "session_id": sid, "text": text, "route": route,
+                      "mode": mode, "sources": src, "tools": [w["type"] for w in ws],
+                      "handoff": route == "handoff", "llm": False})
+        return {"text": reply, "sources": src, "widgets": ws,
+                "state": ["Listen", "Think", "Speak"], "mode": mode,
+                "route": route, "handoff": route == "handoff", "logged": True}
+
+    def _handoff(reason: str, summary: str, mode: str = "offline") -> dict:
+        hist = [{"role": "customer", "text": h["content"]}
+                for h in (SESS_HISTORY.get(sid) or [])[-4:] if h.get("role") == "user"]
+        w = call_tool("handoff.human", {"reason": reason, "queue": "人工坐席",
+                                        "session_id": sid or None, "question": text,
+                                        "summary": summary, "history": hist})
+        # 与在线路径同一口径：转人工必须真建单，并把工单号回挂到交接卡上（坐席台可查、可接管）
+        if w:
+            tk = create_ticket(sid or "", reason, text,
+                               [x for x in (w.payload.get("context") or {}).get("sources") or []],
+                               (w.payload.get("context") or {}).get("history") or hist,
+                               str(w.payload.get("summary") or summary))
+            w.payload["ticket"] = {"id": tk["id"], "status": tk["status"]}
+        return _finish("好的，这就为您转接人工客服，刚才的对话会一并交接过去，您不用再重复一遍。",
+                       "handoff", [w] if w else [], src=[], mode=mode)
+
+    # ① 一键停：AI 已停用 → 一律转人工，不再作答（与在线路径同口径）
+    if KILL["stopped"]:
+        return _handoff("AI 已人工停用（" + (KILL["reason"] or "人工接管") + "）",
+                        "客户在本轮提问，AI 已停用，直接转人工", mode="killed")
+
+    # ② 人工接管中：AI 暂停应答（坐席台接管期间）
+    if sid and TAKEOVER.get(sid):
+        return _finish("当前已由人工坐席接管，AI 已暂停应答。您的话已经转给坐席，请稍候。",
+                       "takeover", src=[], mode="takeover")
+
+    # ③ 「转人工」话题提问（问规则 ≠ 要求转人工）→ 据实回答，不建单
+    if HANDOFF_TOPIC_Q.search(text) and any(k in text for k in HANDOFF_REQ_KW):
+        return _finish(HANDOFF_TOPIC_ANSWER, "kb")
+
+    # ④ 风险兜底优先：命中即转人工并带上上下文建单（一票项场景）
+    _hit = next((r for r in OFFLINE_VETO_RULES if any(k in text for k in r[0])), None)
+    _req = any(k in text for k in HANDOFF_REQ_KW) and not HANDOFF_TOPIC_Q.search(text)
+    if _hit or _req:
+        reason, summary = (_hit[1], _hit[2]) if _hit else ("客户主动要求人工", "客户明确要求人工服务")
+        return _handoff(reason, summary)
+
+    # ⑤ 记忆类提问：据会话档案作答（离线也要看得到「个性化」这一层）
+    pf = SESS_PROFILE.get(sid) or {}
+    if any(k in text for k in ("我叫什么", "我的名字", "我叫啥", "我姓什么", "怎么称呼我")):
+        if pf.get("name"):
+            return _finish("您刚才说您叫" + str(pf["name"]) + "，我记着呢，不用再重复一遍。", "kb", src=[])
+        return _finish("您还没告诉我怎么称呼您 —— 说一下我就记住了，下次直接称呼您。", "kb", src=[])
+
+    # ⑥ 预置脚本：覆盖演示所需的全部能力类型（知识直答 / 清单卡 / 报价卡 / 工单卡）
     script = [
         (("你好", "您好"), "您好，我是这家企业的知识库数字员工，有什么可以帮您？", None),
         (("国标", "标准", "合规", "多少项"), "AI 客服要过的是 GB/T 47746—2026：自查共 61 项（48 应 + 4 宜 + 9 可，含 5 项一票项），"
                                             "我给您列一份自查清单。", ("policy.selfcheck", {})),
-        (("转人工", "人工", "客服电话"), "好的，正在为您转接人工客服，同时把刚才的对话一并交接过去，您不用再重复描述一次。",
-         ("handoff.human", {"reason": "客户主动要求", "queue": "服务坐席"})),
+        (("依据", "凭什么", "来源", "出处", "谁说的", "可靠吗"),
+         "我的答复依据是企业知识库里的标准原文与交付手册，回答下方的「依据」可以逐条展开核对，"
+         "不需要您自己去翻文档。", None),
         (("知识库", "不好用", "答不准"), "大多不是技术问题，而是运营问题：知识是业务过程的产物，不是一堆文件。"
                                           "指定维护人、设更新节奏、用真实问题回归测试，效果才稳。", None),
         (("交付", "多久", "部署", "实施"), "典型分四步：需求与语料盘点、知识库搭建、联调回归、培训验收并留维护手册，全程可远程。", None),
@@ -1451,16 +1549,22 @@ def _offline_reply(text: str) -> dict:
             if tool:
                 w = call_tool(tool[0], tool[1])
                 if w:
-                    widgets = [w.model_dump()]
-            return {
-                "text": reply,
-                "sources": [],
-                "widgets": widgets,
-                "state": ["Listen", "Think", "Speak"],
-                "mode": "offline",
-            }
-    return {"text": "（离线演示模式）这是一段预置回复。离线模式覆盖的示例问题见页面下方的按钮；"
-                    "接入在线链路后由大模型自由作答。", "sources": [], "widgets": [], "mode": "offline"}
+                    widgets = [w]
+            if sid:
+                SESS_UNRESOLVED[sid] = 0      # 答上来了即清零（与在线口径一致）
+            return _finish(reply, "handoff" if (tool and tool[0].startswith("handoff")) else "kb", widgets)
+
+    # ⑦ 未命中：累计「连续未解决」轮次，达到阈值即转人工（交互失败阈值 B21a / B21e）
+    n = (SESS_UNRESOLVED.get(sid, 0) if sid else 0) + 1
+    if sid:
+        SESS_UNRESOLVED[sid] = n
+    if n >= OFFLINE_UNRESOLVED_LIMIT:
+        if sid:
+            SESS_UNRESOLVED[sid] = 0
+        return _handoff("连续 " + str(n) + " 轮未能识别客户意图，达到交互失败阈值",
+                        "客户连续多轮未得到有效答复，按交互失败阈值转人工")
+    return _finish("（离线演示模式）这是一段预置回复。离线模式覆盖的示例问题见页面下方的按钮；"
+                   "接入在线链路后由大模型自由作答。", "answer")
 
 
 @app.get("/api/health")

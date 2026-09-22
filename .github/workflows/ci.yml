@@ -2,11 +2,11 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 jobs:
-  build:
+  lint-and-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +19,75 @@ jobs:
         run: python -c "import sys; sys.path.insert(0,'backend'); import app.main; print('import ok')"
       - name: Secret scan
         run: |
-          if grep -rnE "(sk-[A-Za-z0-9]{16,}|app_secret\s*=\s*\"[^\"]+\")" --include="*.py" --include="*.html" . ; then
-            echo "发现疑似密钥，拒绝合入"; exit 1
+          # 只输出文件名与计数，不打印命中内容 —— 公开仓库的 CI 日志是公开的
+          hits=$(grep -rlE "(sk-[A-Za-z0-9]{16,}|AKID[A-Za-z0-9]{12,}|BEGIN [A-Z ]*PRIVATE KEY)" \
+                 --include="*.py" --include="*.html" --include="*.js" --include="*.json" --include="*.yml" . || true)
+          if [ -n "$hits" ]; then
+            echo "::error::以下文件疑似含密钥（内容不打印），请清理后重试：$hits"
+            exit 1
           fi
-          echo "secret scan ok"
+          echo "secret scan ok（0 命中）"
+      - name: 确认 .env 未被纳入版本控制
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env 被提交了"; exit 1
+          fi
+          echo ".env 未被提交 ✓"
+
+  offline-regression:
+    runs-on: ubuntu-latest
+    needs: lint-and-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+      - name: 启动后端（离线演示模式，无需任何密钥）
+        run: |
+          cd backend
+          DEMO_MODE=offline KB_PATH=../kb nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8011 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8011/api/health && break || sleep 1; done
+      - name: 启动静态前端（含 /api 反向代理）
+        run: |
+          nohup python scripts/dev_server.py --port 8080 --backend http://127.0.0.1:8011 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8080/api/health && break || sleep 1; done
+          curl -sf http://127.0.0.1:8080/api/health
+      - name: 60 条解决率回归（要求解决率 ≥90% 且高风险全部转人工）
+        run: python scripts/run_regression.py
+      - name: 22 项验收（合规模块 / 转人工闭环 / 记忆 / 熔断 / 密钥边界）
+        run: python scripts/acceptance_check.py
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: docs/*.md
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    needs: lint-and-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: 复现评审场景：干净检出（无 .env）一键部署
+        run: |
+          if [ -f .env ]; then echo "::error::工作区不应存在 .env"; exit 1; fi
+          echo "确认：干净检出无 .env ✓ —— 这正是评审拿到仓库时的状态"
+          docker compose config > /dev/null
+          docker compose up -d --build
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/api/health && break || sleep 2; done
+          echo "—— 健康检查 ——"
+          curl -sf http://127.0.0.1:8080/api/health
+          echo "—— 容器状态（应见 Up (healthy)）——"
+          docker compose ps
+          echo "—— 走一次端到端问答 ——"
+          curl -sf -X POST http://127.0.0.1:8080/api/chat \
+            -H "Content-Type: application/json" \
+            -d "$(printf '{"text":"%s","session_id":"ci"}' "$(printf '\u56fd\u6807\u8981\u81ea\u67e5\u591a\u5c11\u9879')")" | head -c 400
+      - name: 失败时输出容器日志
+        if: failure()
+        run: docker compose logs --tail=80
+      - name: 清理
+        if: always()
+        run: docker compose down -v

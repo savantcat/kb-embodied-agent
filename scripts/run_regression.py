@@ -23,6 +23,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+MODE = "unknown"
 BASE = os.getenv("BASE", "http://127.0.0.1:8080").rstrip("/")
 TIMEOUT = int(os.getenv("TIMEOUT", "90"))
 
@@ -111,10 +112,22 @@ def ask(text: str, sid: str) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
+def _mode() -> str:
+    """读后端当前模式：报告必须写明 online/offline —— 否则评审用离线复现会得到相反结论。"""
+    try:
+        import json as _json
+        with urllib.request.urlopen(BASE + "/api/health", timeout=5) as r:
+            return str(_json.load(r).get("demo_mode") or "unknown")
+    except Exception:
+        return "unknown"
+
+
 def main() -> int:
+    global MODE
+    MODE = _mode()                     # 报告里必须写明 online/offline
     rows: list[dict] = []
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    print("回归问句集：%d 条 → %s\n" % (len(CASES), BASE))
+    print("回归问句集：%d 条 → %s（模式 %s）\n" % (len(CASES), BASE, MODE))
     for i, (q, expect) in enumerate(CASES, 1):
         sid = "reg-%s-%03d" % (stamp, i)
         try:
@@ -158,7 +171,8 @@ def main() -> int:
     lines = [
         "# 数字人客服 · 解决率回归报告",
         "",
-        "生成时间：%s　|　问句集：%d 条　|　端点：`%s`" % (time.strftime("%Y-%m-%d %H:%M:%S"), len(rows), BASE),
+        "生成时间：%s　|　问句集：%d 条　|　端点：`%s`　|　模式：**%s**"
+        % (time.strftime("%Y-%m-%d %H:%M:%S"), len(rows), BASE, MODE),
         "",
         "口径：**业务内问题必须被数字人自己接住**（知识库直答 / 反问引导 / 拉回业务 / 据实作答），",
         "不得转人工；只有高风险场景（投诉、法律、身份核验、客户明确要求人工）才转人工。",
