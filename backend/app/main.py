@@ -34,6 +34,63 @@ APP_SECRET = os.getenv("XMOV_APP_SECRET", "")
 GATEWAY = os.getenv("XMOV_GATEWAY", "https://nebula-agent.xingyun3d.com/user/v1/ttsa_v2/session")
 # 端到端版 SDK（XingyunAvatarAgent）：感知 + 大脑 + 表达；我方关闭其内置大脑，仅用其表达层
 SDK_URL = os.getenv("XMOV_SDK_URL", "https://media.xingyun3d.com/xingyun3d/general/litesdk/xmovAvatar_e2e@latest.js")
+
+# 凭证「可用性」判定：不能只判非空 —— 占位符（your_app_id）长度不为 0，只判非空会误判
+# 「已配置」，进而对访客下发 mode=online；前端加载 SDK 后必然鉴权失败，而 SDK 的失败只走
+# onMessage 回调（不上屏），访客看到的就是「数字人没打开，屏幕上一个字都没有」。
+_PLACEHOLDER_HINTS = ("your_", "your-", "your", "xxxx", "changeme", "change_me",
+                      "placeholder", "example", "填入", "你的", "请填", "todo", "test_")
+_XMOV_MIN_LEN = 16          # 星云 appId / appSecret 实测为 32 位，短于此基本是没填真值
+
+
+def xmov_credentials_check():
+    """返回 (是否真的可用, 不可用原因)。原因会原样下发给前端展示，所以必须写成人话。"""
+    pairs = (("XMOV_APP_ID", APP_ID), ("XMOV_APP_SECRET", APP_SECRET))
+    empty = [k for k, v in pairs if not (v or "").strip()]
+    if empty:
+        return False, ("服务端未配置星云凭证（%s 为空）—— 数字人不可用，文字 + 卡片版照常"
+                       % "、".join(empty))
+    for k, v in pairs:
+        low = v.strip().lower()
+        for h in _PLACEHOLDER_HINTS:
+            if h in low:
+                return False, ("%s 仍是占位符（含「%s」）不是真实凭证 —— 请在 .env 填入星云"
+                               "控制台的真实值；数字人不可用，文字 + 卡片版照常" % (k, h))
+        if len(v.strip()) < _XMOV_MIN_LEN:
+            return False, ("%s 长度异常（%d 字符，真实值应为 32 位）—— 疑似未填真实凭证；"
+                           "数字人不可用，文字 + 卡片版照常" % (k, len(v.strip())))
+    return True, ""
+
+
+def xmov_configured():
+    """兼容旧口径：仅表示「凭证看起来可用」。"""
+    return xmov_credentials_check()[0]
+
+
+def llm_credentials_check():
+    """LLM key 是否真的可用（与星云凭证同一口径）。
+
+    修的是同一个坑：`.env.example` 里 `LLM_API_KEY=your_llm_key` 长度不为 0，
+    旧写法 `if not LLM_API_KEY` 判它「已配置」，于是不走向优雅降级，
+    而是拿占位符去请求 DeepSeek —— 必然 401。评审因此会以为「问答跑不起来」。
+    """
+    v = (LLM_API_KEY or "").strip()
+    if not v:
+        return False, "服务端未配置 LLM_API_KEY —— 当前为本地骨架输出（不调用大模型）"
+    low = v.lower()
+    for h in _PLACEHOLDER_HINTS:
+        if h in low:
+            return False, ("LLM_API_KEY 仍是占位符（含「%s」）不是真实凭证 —— 请在 .env 填入"
+                           "真实 key；当前为本地骨架输出（不调用大模型）" % h)
+    if len(v) < _XMOV_MIN_LEN:
+        return False, ("LLM_API_KEY 长度异常（%d 字符）—— 疑似未填真实凭证；"
+                       "当前为本地骨架输出（不调用大模型）" % len(v))
+    return True, ""
+
+
+def llm_ready():
+    """是否真的能调大模型（空值/占位符/长度异常一律为否）。"""
+    return llm_credentials_check()[0]
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
@@ -264,9 +321,13 @@ def create_session(request: Request) -> dict:
             "avatar_ttl": AVATAR_TTL}
     ip = (request.client.host if request.client else "-") or "-"
 
-    if not (APP_ID and APP_SECRET):
+    _ok, _why = xmov_credentials_check()
+    if not _ok:
+        # 旧写法只判 `not (APP_ID and APP_SECRET)` —— 占位符 your_app_id 能过，
+        # 于是对访客假承诺 mode=online，前端必然静默失败。这里改成如实拒绝。
+        record_audit({"kind": "avatar-denied", "reason": _why, "ip": ip, "stage": "credentials"})
         return {**base, "mode": "text", "ttl": SESSION_TTL,
-                "avatar": {"enabled": False, "reason": "服务端未配置星云凭证，数字人不可用（文字版照常）"}}
+                "avatar": {"enabled": False, "reason": _why}}
 
     reason = ""
     if not AVATAR["enabled"]:
@@ -342,7 +403,7 @@ def public_stats() -> dict:
     # 离线模式或缺凭证时 /api/session 不会下发数字人凭证，若只报配置值，
     # 同一个事实会出现两个答案（评审对照 /api/stats 与 /api/session 即可发现）。
     effective = (bool(AVATAR["enabled"]) and DEMO_MODE != "offline"
-                 and bool(APP_ID and APP_SECRET))
+                 and xmov_configured())
     return {"avatar_enabled": AVATAR["enabled"], "avatar_enabled_effective": effective,
             "demo_mode": DEMO_MODE, "avatar_reason": AVATAR["reason"],
             "slot_busy": _slot_busy(), "concurrency": AVATAR_CONCURRENCY,
@@ -668,7 +729,7 @@ async def _back_to_ai_greeting(tk: dict) -> str:
     """数字客服接手后的主动问候：结合刚才的问题，问候并确认是否已解决。"""
     tmpl = ("我是数字客服，已经接手啦。刚才您提到的问题，"
             "请问现在解决了吗？还有什么需要我帮您处理的？")
-    if not LLM_API_KEY:
+    if not llm_ready():
         return tmpl
     hist = [{"role": "user", "content": m["text"]} for m in tk["messages"] if m["role"] == "customer"]
     try:
@@ -1318,7 +1379,7 @@ async def chat(body: ChatIn) -> dict:
     record_audit({
         "kind": "chat", "session_id": body.session_id, "text": text,
         "sources": [t for t, _a, _s in docs], "tools": [w.type for w in widgets],
-        "handoff": handoff, "llm": bool(LLM_API_KEY), "route": route,
+        "handoff": handoff, "llm": llm_ready(), "route": route,
         "guide_used": SESS_GUIDE.get(body.session_id, 0),
     })
 
@@ -1341,7 +1402,7 @@ async def chat(body: ChatIn) -> dict:
 
 async def _llm_raw(sys_prompt: str, user_prompt: str, temperature: float = 0.0) -> str:
     """最小 LLM 调用（供检索判定等内部环节使用，不走 RAG 提示词）。"""
-    if not LLM_API_KEY:
+    if not llm_ready():
         return ""
     payload = {"model": LLM_MODEL, "temperature": temperature,
                "messages": [{"role": "system", "content": sys_prompt},
@@ -1360,7 +1421,7 @@ async def semantic_pick(text: str, top_k: int = 3) -> list[tuple[str, str, str]]
     只让模型在「知识库条目清单」里挑编号，不回答、不编造：挑不出就返回空，
     由调用方走「不知道 + 转人工」。既提高口语问法命中率，又不破坏「无依据不说」。
     """
-    if not LLM_API_KEY or not CORPUS:
+    if not llm_ready() or not CORPUS:
         return []
     idx = "\n".join("%d. %s" % (i + 1, e["q"]) for i, e in enumerate(CORPUS))
     out = await _llm_raw(
@@ -1392,7 +1453,7 @@ async def _triage(text: str, history: list[dict] | None, guide_used: int) -> tup
       HANDOFF —— 仅限：投诉升级/法律纠纷/退款理赔/大额合同/身份核验，或客户明确要求人工
     国标并未要求"随时转人工"；转人工是兜底，不是默认动作。
     """
-    if not LLM_API_KEY:
+    if not llm_ready():
         return ("CLARIFY", "您具体想了解哪方面？比如国标自查、知识库怎么建、交付周期或报价，我直接给您讲。")
     sys_p = (
         "你是企业客服的意图分诊器。用户当前这句话没有命中企业知识库。你要选一个动作并给出回应正文。\n"
@@ -1426,8 +1487,8 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
                    history: list[dict] | None = None, profile: dict | None = None,
                    memory_ok: bool = False) -> str:
     """接大模型：RAG 资料 + 会话历史 + 个性化档案（多轮对话不从头开始）。"""
-    if not LLM_API_KEY:
-        return "（未配置 LLM_API_KEY，当前为本地骨架输出）" + (docs[0][1] if docs else "")
+    if not llm_ready():
+        return "（%s）" % llm_credentials_check()[1] + (docs[0][1] if docs else "")
     ctx = "\n".join(f"[{t}·{s}] {a}" for t, a, s in docs) or "（无检索结果，不得编造）"
     sys_prompt = ("你是企业门店的数字人员工。只依据提供的资料回答；资料不足时只回四个字符：NO_INFO"
                   "（不要编造、不要道歉、不要自行建议转人工——转不转人工由上层策略决定）。"
@@ -1572,7 +1633,7 @@ def health() -> dict:
     return {
         "ok": True,
         "demo_mode": DEMO_MODE,
-        "llm_configured": bool(LLM_API_KEY),
-        "xmov_configured": bool(APP_ID and APP_SECRET),
+        "llm_configured": llm_ready(), "llm_hint": llm_credentials_check()[1],
+        "xmov_configured": xmov_configured(), "xmov_hint": xmov_credentials_check()[1],
         "kb_path": str(KB_PATH),
     }

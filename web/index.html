@@ -233,9 +233,13 @@ document.getElementById("btnA11y").onclick = function(){
 
 // ---- 弱网 / 断网：降级 + 自动重连 ----
 let NET_SIM = false;
-function netBanner(show, text){
+function netBanner(show, text, html){
+  // html=true 时按 HTML 注入（用于「点这里重试」这类可点元素）；
+  // 默认 false 走 textContent，保持既有调用与外部文本的安全性。
   const b = document.getElementById("netBanner");
-  if (text) b.textContent = text;
+  if (text != null && text !== ""){
+    if (html) b.innerHTML = text; else b.textContent = text;
+  }
   b.style.display = show ? "block" : "none";
 }
 document.getElementById("btnNet").onclick = function(){
@@ -256,6 +260,83 @@ async function tryReconnect(){
   try{
     if (AGENT && typeof AGENT.reconnect === "function"){ await AGENT.reconnect(); emb("Reconnect","已下发重连指令"); }
   }catch(e){ emb("Reconnect","重连未成功：" + ((e && e.message) || e)); }
+}
+// ---- 数字人连接失败必须被看见（修「数字人没打开，屏幕上一个字都没有」）----
+// 背景：SDK 在「网关鉴权失败 / 网关不可达 / 字段未识别」时走的是 onMessage 回调，
+// 并 return null（既不 reject，也不抛异常）。此前 onMessage 只 console.warn，
+// 于是会话建不起来时页面毫无提示、占位符一直挂着 —— 用户只会报「数字人没打开」。
+let AVATAR_FAILED = false, AVATAR_DOWN = false, AVATAR_TIMER = 0;
+const AVATAR_WAIT_MS = 8000;                 // 超过这个时间还没画面，就当连接失败
+const XMOV_ERR_HINT = {
+  // —— 会话/连接类（这一类必须判失败，用户要立刻知道）——
+  10001: "找不到数字人容器（页面元素缺失）",      3101: "找不到数字人容器（页面元素缺失）",
+  10002: "连不上厂商实时通道（网关不可达）",      3102: "连不上厂商实时通道（网关不可达）",
+  10003: "会话建立失败：多为应用凭证无效或未授权 —— 请检查 XMOV_APP_ID / XMOV_APP_SECRET 是否为真实值",
+  10004: "会话关闭异常（厂商侧结束）",            3104: "会话关闭异常（厂商侧结束）",
+  10005: "SDK 初始化失败",                        3105: "SDK 初始化失败",
+  10006: "实时通道已退出（可能被厂商侧结束）",    3106: "实时通道已退出（可能被厂商侧结束）",
+  10007: "实时通道断开（网络中断或被厂商侧断开）", 3107: "实时通道断开（网络中断或被厂商侧断开）",
+  // —— 素材/形象类 ——
+  30001: "背景素材加载失败",                       30002: "数字人形象数据加载失败（角色 ID 可能不存在）",
+  30004: "数字人视频素材下载失败",                 30005: "数字人形象数据已过期（请到控制台确认应用与角色）",
+  30006: "播报动作已过期",                         30007: "语音播报已过期",
+  40001: "音频解码失败",                           40002: "人脸数据解码失败",
+  60001: "WebGL 上下文丢失（显卡/浏览器渲染异常）",
+};
+// 断网类：交给已有的 offline/重连链路处理，不在这里判死
+const XMOV_NET_ERR = new Set([50001, 50003, 50004]);      // NETWORK_DOWN / RETRY / BREAK
+// 恢复类：收到即清掉失败态，让数字人回到正常显示
+const XMOV_NET_OK  = new Set([50002]);                     // NETWORK_UP
+function xmovReason(code, message){
+  const c = Number(code);
+  if (XMOV_ERR_HINT[c]) return XMOV_ERR_HINT[c];
+  const m = String(message || "").replace(/^Error:\s*/, "").trim();
+  if (m) return m;
+  return code ? ("厂商返回错误码 " + code) : "星云实时会话未能建立";
+}
+// 是否真的有画面（占位符还在 = 没画面）
+function avatarVisible(){
+  const f = $("#face");
+  return !!(f && f.style.display === "none");
+}
+function avatarFail(reason, code){
+  if (AVATAR_FAILED) return;
+  AVATAR_FAILED = true;
+  clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;
+  const safe = String(reason || "未知原因").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  // ① 顶部横幅：真实原因 + 一键重试（不再静默）
+  netBanner(true, "🎭 数字人未能开启：" + safe +
+    ' · 文字 + 卡片版照常可用 · <b style="cursor:pointer;text-decoration:underline" onclick="retryAvatar()">点这里重试</b>',
+    true);                                   // 需要可点，故按 HTML 注入
+  // ② 形象位：把原因写上去，替掉那句会误导人的「离线演示」占位
+  const f = $("#face");
+  if (f){
+    f.style.display = "";
+    f.innerHTML = "数字人未能开启<br><span style='font-size:11px'>" + safe +
+      "<br>文字 + 卡片版照常可用</span>";
+  }
+  // ③ 角标 + 对话各留一处，任何视线落点都能看到
+  const b = $("#modeBadge");
+  if (b){ b.textContent = "文字 + 卡片版（数字人未连接）"; b.className = "badge text"; }
+  bubble("bot", "数字人未能开启：" + reason + "。文字问答 + 卡片交付不受影响。",
+         code ? ("错误码 " + code) : "");
+  emb("AvatarFail", String(reason).slice(0, 60));
+  // 真停：倒计时每秒会覆写角标，不停的话刚写的失败角标马上又被盖回「剩余 x:xx」
+  if (AV_TTL_TIMER){ clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null; }
+  // 数字人都起不来，就没必要再维持心跳占着服务端名额（停跳即由服务端释放）
+  if (typeof stopKeepalive === "function") stopKeepalive();
+}
+// 重试：重新加载 SDK（名额被占 / 网络抖动时有效；凭证类错误重试也不会好，但原因会写清）
+function retryAvatar(){
+  if (!(SESSION && SESSION.sdk_url)){ location.reload(); return; }
+  AVATAR_FAILED = false;
+  AVATAR_DOWN = false;
+  clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;
+  netBanner(false);
+  const f = $("#face");
+  if (f){ f.style.display = ""; f.innerHTML = "正在重连数字人…"; }
+  emb("AvatarRetry", "用户点重试");
+  loadSdk(SESSION.sdk_url, SESSION.avatar || {});
 }
 
 
@@ -717,7 +798,31 @@ function loadSdk(url, av){
             if (VOICE_LOOP && !MIC.on) setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 500);
           }
         },
-        onMessage(err){ console.warn("星云 SDK:", err); },
+        onMessage(err){
+          // SDK 的失败上报口：网关鉴权失败 / 网关不可达 / 字段未识别都从这里出来，
+          // 且 SDK 回调后 return null（既不 reject 也不抛异常）——所以必须在这里变成用户看得见的提示。
+          console.warn("星云 SDK:", err);
+          const code = err && err.code;
+          const reason = xmovReason(code, err && err.message);
+          emb("SDK", "onMessage code=" + (code || "-"));
+          if (XMOV_NET_OK.has(Number(code))){          // 网络恢复：清失败态并重载
+            emb("SDK", "网络恢复信号，清理失败态");
+            AVATAR_DOWN = false;
+            if (AVATAR_FAILED){ AVATAR_FAILED = false; retryAvatar(); }
+            return;
+          }
+          if (XMOV_NET_ERR.has(Number(code)) || !navigator.onLine){
+            // 断网场景由 window 的 offline 监听与自动重连接管，不在此判死
+            netBanner(true, "🌐 检测到网络问题：" + reason + " · 网络恢复后会自动重连");
+            emb("Reconnect", "SDK 报网络类错误：" + code);
+            AVATAR_DOWN = true;                       // 会话按定义没建立，别被成功收尾当已连上
+            if (AV_TTL_TIMER){ clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null; }
+            const bd = $("#modeBadge");
+            if (bd){ bd.textContent = "文字 + 卡片版（网络异常）"; bd.className = "badge text"; }
+            return;
+          }
+          avatarFail("厂商 SDK 上报：" + reason, code);
+        },
         // 功能开关：ASR 识别结果不自动送平台大脑 —— 交回我方 Agent（RAG + 工具）处理
         features: { auto_send_asr_to_llm: false, vad_merge_mode: true },
         // 断线自动重连（SDK 内置：短重试 + 指数退避，随后重新建会话）
@@ -760,9 +865,24 @@ function loadSdk(url, av){
         bubble("bot", "服务端未开启数字人演示，已用文字 + 卡片版。");
         return;
       }
+      // 兜底：SDK 既不给画面也不报错时必须靠超时兜住，否则又回到「点了没反应」
+      clearTimeout(AVATAR_TIMER);
+      AVATAR_TIMER = setTimeout(() => {
+        if (!avatarVisible() && !AVATAR_FAILED && !AVATAR_DOWN)
+          avatarFail("连接超时：8 秒内未建立星云实时会话（多为凭证无效或网关不可达）", 0);
+      }, AVATAR_WAIT_MS);
       AGENT = new Ctor(opts);
       if (typeof AGENT.init === "function") await AGENT.init();
+      if (AVATAR_FAILED || AVATAR_DOWN){
+        // init 期间 onMessage 已上报失败/断网（SDK 的失败方式就是「回调 + return null」，
+        // 不是抛异常）。此时若继续走成功收尾，会把刚写上去的提示盖掉，
+        // 页面又变回「点了没反应」—— 必须让位给失败/降级态。
+        emb("AvatarFail", "init 期间已判定失败或断网，跳过成功收尾");
+        return;
+      }
+      clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;   // 有画面了，撤掉超时兜底
       $("#face").style.display = "none";
+      AVATAR_FAILED = false;
       setAvatarView("landscape");            // 档1：上线即切大画面（16:9），可全屏
       bubble("bot", "数字人已就绪：表达层=星云实时驱动（厂商），大脑与工具=我方自研。");
     }catch(e){
