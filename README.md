@@ -6,6 +6,8 @@
 把**企业自己的知识库**变成一个可以在屏幕前面**面对面问答**的数字员工：有形象、能表达、
 有大脑、会办事——客户不用打字，直接开口问；答不上来时它会**调工具办事**并把结果**当场显示成卡片**。
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/savantcat/kb-embodied-agent)](https://m8ven.ai/mcp/savantcat/kb-embodied-agent?s=readme)
+
 ---
 
 ## 1. 背景与痛点（为什么做这个）
