@@ -34,6 +34,19 @@ jobs:
           fi
           echo ".env 未被提交 ✓"
 
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: lint-and-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: 单元测试（离线模式，零密钥）
+        run: python -m pytest -q
+
   offline-regression:
     runs-on: ubuntu-latest
     needs: lint-and-scan
