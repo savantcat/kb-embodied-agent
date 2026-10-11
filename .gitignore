@@ -17,3 +17,8 @@ kb/private/
 logs/
 _regression_result.json
 .env.bak*
+
+# 演示站专用：公网底稿快照与临时工作区（不入仓）
+web/index.live.html
+web/index.public.html
+_tmp/

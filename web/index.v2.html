@@ -1,0 +1,2733 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KB-Embodied-Agent · 企业知识库具身客服（演示）</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#131a33; --panel2:#1a2346; --line:#26305a;
+    --fg:#e8ecf8; --dim:#94a3c8; --accent:#5b8cff; --ok:#33d69f; --warn:#ffb020;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);
+         background:linear-gradient(180deg,#101736,#0b1020)}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .sub{color:var(--dim);font-size:12px}
+  .badge{margin-left:auto;font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .badge.online{color:var(--ok);border-color:#1c6f52}
+  .badge.offline{color:var(--warn);border-color:#7a5a12}
+  .badge.text{color:#8fb0ff;border-color:#33507a}
+  main{display:grid;grid-template-columns:660px 1fr;gap:0;height:calc(100vh - 57px)}
+  section.stage{border-right:1px solid var(--line);padding:18px;display:flex;flex-direction:column;gap:12px;overflow:hidden;
+                background:radial-gradient(120% 80% at 50% 0%,#16204a 0%,#0b1020 70%)}
+  /* 画面区：默认「圆脸占位」；数字人上线后切到大画面（16:9 或 9:16），可全屏 */
+  .avatar{position:relative;margin:0 auto;border-radius:14px;overflow:hidden;flex:0 0 auto;
+          width:100%;height:420px;
+          background:conic-gradient(from 0deg,#22305e,#3b56a8,#22305e);display:grid;place-items:center;
+          box-shadow:0 0 0 1px var(--line), 0 18px 50px rgba(0,0,0,.5)}
+  .avatar.round{ /* 占位态：与上线态同一盒子尺寸，仅换内部占位脸，不产生布局跳动 */ }
+  .avatar.landscape,.avatar.portrait{width:100%;height:420px}
+  .avatar:fullscreen,.avatar:-webkit-full-screen{width:100vw;height:100vh;border-radius:0}
+  .avatar .face{width:240px;height:240px;border-radius:50%;background:linear-gradient(180deg,#2a3768,#1b2450);
+                display:grid;place-items:center;color:var(--dim);font-size:13px;text-align:center;padding:8px}
+  .viewbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto}
+  .viewbar span.hint{font-size:11px;color:var(--dim)}
+  .avatar[data-state="Speak"]{animation:speak 1.2s ease-in-out infinite}
+  .avatar[data-state="Listen"]{animation:listen 2.4s ease-in-out infinite}
+  .avatar[data-state="Think"]{animation:think 1.6s ease-in-out infinite}
+  @keyframes speak{0%,100%{box-shadow:0 0 0 1px var(--line),0 18px 50px rgba(0,0,0,.5)}
+                   50%{box-shadow:0 0 0 6px rgba(91,140,255,.25),0 18px 50px rgba(0,0,0,.5)}}
+  @keyframes listen{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+  @keyframes think{0%,100%{transform:rotate(0)}50%{transform:rotate(2deg)}}
+  .states{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;flex:0 0 auto}
+  .chip{font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+  .chip.active{color:#fff;background:var(--accent);border-color:transparent}
+  .subtitle{min-height:64px;height:78px;overflow:auto;flex:0 0 auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px}
+  .tools{margin-top:auto;font-size:12px;color:var(--dim)}
+  .tools code{color:#cbd5ff}
+  section.chat{display:flex;flex-direction:column;min-height:0}
+  #log{flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+  .msg{max-width:76%;padding:10px 13px;border-radius:14px;white-space:pre-wrap;word-break:break-word}
+  .me{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+  .bot{align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-bottom-left-radius:4px}
+  .meta{font-size:11px;color:var(--dim);margin-top:6px}
+  .card{align-self:flex-start;max-width:76%;background:var(--panel2);border:1px solid #33407a;
+        border-radius:14px;padding:12px 14px}
+  .card h4{margin:0 0 8px;font-size:14px}
+  .card ul{margin:0;padding-left:18px}
+  .card .kv{display:flex;gap:10px;justify-content:space-between;font-size:14px}
+  .card .note{margin-top:8px;font-size:11px;color:var(--dim)}
+  footer{border-top:1px solid var(--line);padding:12px;display:flex;gap:8px;background:#0e1430}
+  input[type=text]{flex:1;background:#0b1020;border:1px solid var(--line);color:var(--fg);
+                   border-radius:10px;padding:11px 12px;outline:none}
+  input[type=text]:focus{border-color:var(--accent)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 16px;cursor:pointer;font-size:14px}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--dim)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 10px}
+  .acts{display:flex;gap:6px;flex-wrap:wrap;padding:0;flex:0 0 auto}
+  .acts button{font-size:12px;padding:8px 10px}
+  .acts button.danger{background:#3a1220;border:1px solid #a03050;color:#ff9db4}
+  .acts button.on{background:#a03050;color:#fff;border-color:transparent}
+  .banner{display:none;margin:0 0 10px;padding:9px 12px;border-radius:10px;background:#3a1220;
+          border:1px solid #a03050;color:#ffd0da;font-size:13px}
+  .banner.show{display:block}
+  .evi{margin-top:8px;font-size:12px;color:var(--dim)}
+  .evi summary{cursor:pointer;color:#8fb0ff}
+  .evi pre{white-space:pre-wrap;margin:6px 0 0;font-family:inherit;font-size:12px;color:#c8d3f5;
+           background:#0e1430;border:1px solid var(--line);border-radius:8px;padding:8px}
+  .report{align-self:flex-start;max-width:82%;background:var(--panel2);border:1px solid #33407a;border-radius:14px;padding:12px 14px}
+  .report h4{margin:0 0 6px;font-size:14px}
+  .report .verdict{font-size:15px;font-weight:600;margin:2px 0 8px}
+  .report table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+  .report th,.report td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}
+  .report .veto{color:#ffb020;font-weight:600}
+  .bar{height:8px;border-radius:6px;background:#222c52;overflow:hidden;margin:6px 0}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,#33d69f,#5b8cff)}
+  @media (max-width:820px){ main{grid-template-columns:1fr;height:auto} section.stage{border-right:0;border-bottom:1px solid var(--line)} }
+
+/* —— 具身状态看板 / 弱网演练 / 适老化 —— */
+.humanbanner{display:none;margin:8px 0 0;padding:9px 12px;border:1px solid #1e3a5f;background:#0f1c2e;color:#93c5fd;border-radius:8px;font-size:12.5px}
+.humanbanner.on{display:block}
+.netbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #5a4520;background:#241d0f;color:#f59e0b;border-radius:8px;font-size:12.5px}
+.micbanner{display:none;margin:8px 0 0;padding:8px 12px;border:1px solid #1e4d3a;background:#0f241c;color:#34d399;border-radius:8px;font-size:12.5px}
+.micbanner.err{border-color:#7f1d1d;background:#241010;color:#fca5a5}
+.micbanner b{text-decoration:underline;cursor:pointer}
+/* 麦克风电平：说话时这条要动；不动说明麦克风压根没采到声音（设备/权限问题，不是识别问题） */
+.miclevel{display:none;align-items:center;gap:8px;margin:6px 0 0;font-size:11.5px;color:#666}
+.miclevel i{display:block;height:8px;width:0;background:linear-gradient(90deg,#34d399,#fbbf24,#ef4444);border-radius:4px;transition:width .08s linear}
+.miclevel .track{flex:1;height:8px;background:#e6e8ec;border-radius:4px;overflow:hidden}
+/* 全屏：让整个画面区（含按钮、横幅、字幕）都进全屏，否则全屏后什么都点不到 */
+.stage:fullscreen{background:#0b0f14;padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto}
+.stage:fullscreen .avatar{height:min(58vh,600px);border-radius:12px}
+.stage:fullscreen .subtitle{font-size:15px}
+.embody{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#0d1218;overflow:hidden;flex:1 1 auto;min-height:0}
+.embody .ehd{display:flex;justify-content:space-between;gap:10px;padding:7px 11px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
+.embody .elog{max-height:132px;overflow:auto;padding:6px 11px;font:12px/1.7 Consolas,Menlo,monospace}
+.embody .erow{display:flex;gap:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.embody .et{color:#4b5563}
+.embody .ek{min-width:68px;flex:0 0 68px;font-weight:600}
+.embody .ed{color:var(--dim);overflow:hidden;text-overflow:ellipsis}
+body.a11y{font-size:17px}
+body.a11y #log{font-size:17px}
+body.a11y .subtitle{font-size:17px;background:#000;color:#fff;border-color:#fff}
+body.a11y .msg{font-size:17px;line-height:1.9}
+body.a11y .quick button{font-size:15px;padding:9px 13px}
+body.a11y :root{--dim:#c9d1d9}
+.msg.human{border-left:3px solid #22c55e;background:#0f2417}
+.caption{position:fixed;left:0;right:0;bottom:0;padding:14px 28px;background:rgba(6,10,16,.92);
+  color:#e6edf3;font-size:19px;line-height:1.5;border-top:2px solid #3b82f6;display:none;z-index:99}
+.caption.on{display:block}
+.caption b{color:#93c5fd}
+.caption .step{color:#8b949e;font-size:13px;display:block;margin-bottom:3px}
+.demotip{position:fixed;right:18px;top:70px;z-index:99;display:none;max-width:340px;padding:12px 14px;
+  background:#1c1206;border:1px solid #5a4520;color:#f59e0b;border-radius:10px;font-size:14px;line-height:1.6}
+.demotip.on{display:block}
+</style>
+<style>
+/* ============================================================================
+   KB-Embodied-Agent · v2 叠加设计层（主题令牌驱动版）
+   ----------------------------------------------------------------------------
+   设计参考：魔珐星云官网（xingyun3d.com）视觉规范
+     · 亮底 · 大留白 · 极克制 · 中性色为主 · 主按钮黑底白字
+     · 卡片：大圆角 + 细浅灰边 + 柔和阴影
+     · 品牌蓝渐变 linear-gradient(154deg,#1a4eda,#3b81f6)，强调色 rgb(36,99,240)
+   改法：只叠加，不覆盖原样式契约。原 CSS 里写死的色值在本文件改写成令牌，
+         两套皮肤共用同一套规则，换肤只换令牌。
+   生效条件：body 上带 data-v2t 属性（由 _v2_dash.js 设置）。
+   回退：删掉本文件与 _v2_dash.js 的外链即可回到原样。
+   ============================================================================ */
+
+/* ---------- 1. 主题令牌 ---------- */
+body[data-v2t]{
+  --v2-head-bg: none;
+  --v2-head-line: var(--line);
+  --v2-page: var(--bg);
+  --v2-foot-bg: var(--panel);
+  --v2-input-bg: var(--panel);
+  --v2-stage-bg: none;
+  --v2-avatar-bg: var(--panel2);
+  --v2-face-bg: transparent;
+  --v2-track-bg: var(--line);
+  --v2-bar-bg: var(--line);
+  --v2-bar-fg: linear-gradient(90deg,#1a4eda,#3b81f6);
+  --v2-on-accent: #fff;
+  --v2-line2: var(--line);
+  --v2-code: var(--fg);
+  --v2-ok: var(--ok);
+  --v2-warn: var(--warn);
+  --v2-bad: #d64550;
+  --v2-ok-soft: rgba(15,157,110,.10);
+  --v2-warn-soft: rgba(183,121,31,.10);
+  --v2-bad-soft: rgba(214,69,80,.10);
+  --v2-ok-line: rgba(15,157,110,.38);
+  --v2-warn-line: rgba(183,121,31,.38);
+  --v2-bad-line: rgba(214,69,80,.38);
+  --v2-radius: 14px;
+  --v2-radius-sm: 10px;
+  --v2-shadow: 0 8px 26px -16px rgba(20,45,100,.22);
+  --v2-shadow-hi: 0 16px 40px -20px rgba(20,45,100,.3);
+  --v2-glow: 0 0 0 1px #dfe7f6;
+}
+
+/* 亮色 · 魔珐风（默认皮肤） */
+body[data-v2t="light"]{
+  --bg:#ffffff; --panel:#ffffff; --panel2:#f6f8fc;
+  --line:#e8ecf2; --fg:#141414; --dim:#6b7280;
+  --accent:#1f5fe0; --ok:#0f9d6e; --warn:#b7791f;
+  --v2-page:#ffffff;
+  --v2-head-bg:linear-gradient(180deg,#ffffff,#fbfcfe);
+  --v2-stage-bg:radial-gradient(90% 60% at 50% -10%, #eef3ff 0%, rgba(255,255,255,0) 62%), #fbfcfe;
+  --v2-avatar-bg:linear-gradient(158deg,#f2f6ff 0%,#e4ecfd 52%,#eff4ff 100%);
+  --v2-foot-bg:#fbfcfe;
+  --v2-input-bg:#ffffff;
+  --v2-line2:#e8ecf2;
+  --v2-track-bg:#eef1f6;
+  --v2-bar-bg:#eef1f6;
+  --v2-shadow:0 8px 26px -16px rgba(20,45,100,.22);
+  --v2-shadow-hi:0 16px 40px -20px rgba(20,45,100,.3);
+  --v2-glow:0 0 0 1px #dfe7f6;
+}
+/* 深色 · 备用皮肤 */
+body[data-v2t="dark"]{
+  --bg:#0b1020; --panel:#131a33; --panel2:#1a2346;
+  --line:#26305a; --fg:#e8ecf8; --dim:#94a3c8;
+  --accent:#5b8cff; --ok:#33d69f; --warn:#ffb020;
+  --v2-page:#0b1020;
+  --v2-head-bg:linear-gradient(180deg,#101736,#0b1020);
+  --v2-stage-bg:radial-gradient(80% 55% at 50% 0%, rgba(91,140,255,.16) 0%, rgba(11,16,32,0) 70%), #0b1020;
+  --v2-avatar-bg:radial-gradient(120% 90% at 50% 12%,#222f63 0%,#131b3c 55%,#0c1226 100%);
+  --v2-foot-bg:#0e1430;
+  --v2-input-bg:#101736;
+  --v2-line2:#33407a;
+  --v2-track-bg:#222c52;
+  --v2-bar-bg:#222c52;
+  --v2-bar-fg:linear-gradient(90deg,#33d69f,#5b8cff);
+  --v2-shadow:0 10px 34px -18px rgba(0,0,0,.75);
+  --v2-shadow-hi:0 18px 46px -20px rgba(0,0,0,.85);
+  --v2-glow:0 0 0 1px rgba(91,140,255,.22);
+  --v2-ok-soft:rgba(51,214,159,.10);
+  --v2-warn-soft:rgba(255,176,32,.10);
+  --v2-bad-soft:rgba(214,69,80,.14);
+  --v2-ok-line:rgba(51,214,159,.42);
+  --v2-warn-line:rgba(255,176,32,.42);
+  --v2-bad-line:rgba(214,69,80,.42);
+}
+
+/* ---------- 2. 把原 CSS 的写死色值改写成令牌（两套皮肤共用） ---------- */
+body[data-v2t] header{ background:var(--v2-head-bg); border-bottom:1px solid var(--v2-head-line) }
+body[data-v2t] section.stage{ background:var(--v2-stage-bg); border-right:0 }
+body[data-v2t] section.chat{ background:var(--bg) }
+body[data-v2t] .avatar{ background:var(--v2-avatar-bg) }
+body[data-v2t] .avatar .face{ background:var(--v2-face-bg) }
+body[data-v2t] footer{ background:var(--v2-foot-bg); border-top:1px solid var(--v2-head-line) }
+body[data-v2t] input[type=text]{ background:var(--v2-input-bg); color:var(--fg); border-color:var(--v2-line2) }
+/* 注意：绝不能写成 body[data-v2t] button{color:#fff} —— 它(0,1,2)会压掉
+   原 .ghost(0,1,1) 的 --dim 色，亮色皮肤下 ghost 按钮变成白字白底＝看不见。
+   必须用 :not(.ghost) 把这批按钮放过去，并把 ghost 的颜色显式钉回来。 */
+body[data-v2t] button:not(.ghost){ color:var(--v2-on-accent) }
+body[data-v2t] button.ghost{ color:var(--dim); border-color:var(--v2-line2) }
+body[data-v2t] button.ghost:hover{ color:var(--fg); border-color:var(--accent) }
+body[data-v2t] .chip.active{ color:var(--v2-on-accent) }
+body[data-v2t] .me{ color:var(--v2-on-accent) }
+body[data-v2t] .tools code{ color:var(--v2-code) }
+body[data-v2t] .card{ border:1px solid var(--v2-line2) }
+body[data-v2t] .report{ border:1px solid var(--v2-line2) }
+body[data-v2t] .report .veto{ color:var(--v2-warn) }
+body[data-v2t] .evi summary{ color:var(--accent) }
+body[data-v2t] .evi pre{ color:var(--fg); background:var(--v2-foot-bg) }
+body[data-v2t] .bar{ background:var(--v2-bar-bg) }
+body[data-v2t] .bar > i{ background:var(--v2-bar-fg) }
+body[data-v2t] .miclevel{ color:var(--dim) }
+body[data-v2t] .miclevel .track{ background:var(--v2-track-bg) }
+body[data-v2t] .embody{ background:var(--v2-foot-bg); border-color:var(--v2-line2) }
+body[data-v2t] .embody .et{ color:var(--dim) }
+body[data-v2t] .stage:fullscreen{ background:var(--v2-page) }
+body[data-v2t] .badge.online{ border-color:var(--v2-ok-line); color:var(--v2-ok) }
+body[data-v2t] .badge.offline{ border-color:var(--v2-warn-line); color:var(--v2-warn) }
+body[data-v2t] .badge.text{ color:var(--accent); border-color:var(--v2-line2) }
+body[data-v2t] .humanbanner{ border-color:var(--v2-line2); background:var(--v2-ok-soft); color:var(--v2-ok) }
+body[data-v2t] .netbanner{ border-color:var(--v2-warn-line); background:var(--v2-warn-soft); color:var(--v2-warn) }
+body[data-v2t] .micbanner{ border-color:var(--v2-ok-line); background:var(--v2-ok-soft); color:var(--v2-ok) }
+body[data-v2t] .micbanner.err{ border-color:var(--v2-bad-line); background:var(--v2-bad-soft); color:var(--v2-bad) }
+body[data-v2t] .banner{ background:var(--v2-bad-soft); border-color:var(--v2-bad-line); color:var(--v2-bad) }
+body[data-v2t] .acts button.danger{ background:var(--v2-bad-soft); border-color:var(--v2-bad-line); color:var(--v2-bad) }
+body[data-v2t] .acts button.on{ background:var(--v2-bad); border-color:var(--v2-bad); color:#fff }
+body[data-v2t] .msg.human{ border-left:3px solid var(--v2-ok); background:var(--v2-ok-soft) }
+body[data-v2t] .caption{ color:var(--fg); border-top:2px solid var(--accent) }
+body[data-v2t] .caption b{ color:var(--accent) }
+body[data-v2t] .caption .step{ color:var(--dim) }
+body[data-v2t] .demotip{ background:var(--v2-warn-soft); border-color:var(--v2-warn-line); color:var(--v2-warn) }
+
+/* ---------- 3. 骨架：三栏 + 大留白 ---------- */
+body[data-v2t] header{ padding:11px 18px; flex-wrap:wrap; gap:12px }
+body[data-v2t] main{
+  display:grid;
+  /* 四个子项（左栏/舞台/对话/右栏）必须显式落位：只写 3 列会让第 4 项换行到第 2 行，
+     行高被腰斩 → 舞台 overflow:hidden 把「全屏/国标体检/操作留痕/字幕条」整段剪掉、点不到。 */
+  grid-template-columns:298px minmax(0,1fr) 340px;
+  /* 首列上下两格的分配：不能用 auto（左栏内容高会吃光整列，右栏被压成 0px）；
+     按比例分，两栏各自内部滚动。 */
+  grid-template-rows:minmax(0,1.15fr) minmax(0,1fr);
+  grid-template-areas:"left stage chat" "right stage chat";
+  gap:14px; padding:14px 16px 0; height:calc(100vh - 57px); overflow:hidden;
+  background:var(--bg);
+}
+body[data-v2t] main > section.stage{ grid-area:stage; min-height:0; overflow-y:auto; overflow-x:hidden }
+body[data-v2t] main > section.chat{ grid-area:chat; min-height:0 }
+body[data-v2t] aside#v2left{ grid-area:left; min-height:0; overflow-y:auto }
+body[data-v2t] aside#v2right{ grid-area:right; min-height:0; overflow-y:auto }
+/* 矮屏（演示机 1536×864 这类）：数字人让位，保证舞台里的按钮区不用滚动就够得着 */
+@media (max-height:900px){
+  body[data-v2t] #avatar{ height:min(40vh,330px) !important }
+}
+body[data-v2t] section.stage{
+  border:1px solid var(--v2-line2); border-radius:var(--v2-radius);
+  padding:16px; box-shadow:var(--v2-shadow); min-width:0;
+}
+body[data-v2t] section.chat{
+  border:1px solid var(--v2-line2); border-radius:var(--v2-radius);
+  box-shadow:var(--v2-shadow); overflow:hidden; min-width:0;
+}
+
+/* ---------- 4. 顶部状态条 ---------- */
+#v2bar{ display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:wrap }
+.v2pill{
+  display:inline-flex; align-items:center; gap:7px;
+  padding:5px 11px; border-radius:999px; font-size:12px; line-height:1;
+  color:var(--dim); background:var(--v2-foot-bg);
+  border:1px solid var(--v2-line2); white-space:nowrap;
+}
+.v2pill b{ color:var(--fg); font-weight:600; font-variant-numeric:tabular-nums }
+.v2dot{ width:7px; height:7px; border-radius:50%; background:var(--dim); flex:0 0 auto }
+.v2dot.ok{ background:var(--v2-ok); box-shadow:0 0 0 3px var(--v2-ok-soft) }
+.v2dot.warn{ background:var(--v2-warn); box-shadow:0 0 0 3px var(--v2-warn-soft) }
+.v2dot.live{ background:var(--v2-ok); animation:v2breathe 2.2s ease-in-out infinite }
+@keyframes v2breathe{
+  0%,100%{ opacity:1; box-shadow:0 0 0 3px var(--v2-ok-soft) }
+  50%{ opacity:.55; box-shadow:0 0 0 7px transparent }
+}
+#v2theme{
+  display:inline-flex; align-items:center; gap:6px; cursor:pointer;
+  padding:5px 12px; border-radius:999px; font-size:12px;
+  background:#141414; color:#fff; border:1px solid #141414;
+  transition:transform .18s ease;
+}
+#v2theme:hover{ transform:translateY(-1px) }
+body[data-v2t="dark"] #v2theme{ background:transparent; color:var(--fg); border-color:var(--v2-line2) }
+
+/* ---------- 5. 侧栏面板 ---------- */
+aside.v2rail{ display:flex; flex-direction:column; gap:14px; min-width:0; overflow:auto; padding-bottom:16px }
+.v2card{
+  background:var(--panel); border:1px solid var(--v2-line2); border-radius:var(--v2-radius);
+  padding:14px 15px 15px; box-shadow:var(--v2-shadow);
+  transition:box-shadow .22s ease, transform .22s ease;
+}
+.v2card:hover{ box-shadow:var(--v2-shadow-hi); transform:translateY(-1px) }
+.v2card > h3{
+  margin:0 0 12px; font-size:12.5px; font-weight:600; color:var(--fg);
+  display:flex; align-items:center; gap:7px; letter-spacing:.3px;
+}
+.v2card > h3::before{
+  content:""; width:3px; height:12px; border-radius:2px;
+  background:linear-gradient(180deg,#1a4eda,#3b81f6); flex:0 0 auto;
+}
+.v2card .vhint{ margin-left:auto; font-size:11px; color:var(--dim); font-weight:400 }
+
+/* KPI */
+.v2kpis{ display:grid; grid-template-columns:1fr 1fr; gap:9px }
+.v2kpi{
+  background:var(--v2-foot-bg); border:1px solid var(--v2-line2); border-radius:var(--v2-radius-sm);
+  padding:10px 11px; position:relative; overflow:hidden;
+}
+.v2kpi::after{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:2px;
+  background:var(--v2-bar-fg); opacity:.85;
+}
+.v2kpi .k{ font-size:11px; color:var(--dim); margin-bottom:5px }
+.v2kpi .v{
+  font-size:20px; font-weight:650; color:var(--fg); line-height:1.12;
+  font-variant-numeric:tabular-nums; letter-spacing:-.4px;
+}
+.v2kpi .v small{ font-size:11px; font-weight:400; color:var(--dim); margin-left:3px; letter-spacing:0 }
+.v2kpi .d{ font-size:10.5px; color:var(--dim); margin-top:3px }
+
+/* 占比条 */
+.v2bars{ display:flex; flex-direction:column; gap:11px }
+.v2bar-row .lb{ display:flex; justify-content:space-between; font-size:11.5px; color:var(--dim); margin-bottom:5px }
+.v2bar-row .lb b{ color:var(--fg); font-weight:600; font-variant-numeric:tabular-nums }
+.v2track{ height:7px; border-radius:999px; background:var(--v2-track-bg); overflow:hidden; position:relative }
+.v2track > i{
+  display:block; height:100%; border-radius:999px; width:0;
+  background:var(--v2-bar-fg); transition:width .85s cubic-bezier(.22,1,.36,1);
+  position:relative; overflow:hidden;
+}
+.v2track > i::after{
+  content:""; position:absolute; inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+  transform:translateX(-100%); animation:v2sheen 2.6s ease-in-out infinite;
+}
+@keyframes v2sheen{ 0%{ transform:translateX(-100%) } 55%,100%{ transform:translateX(100%) } }
+.v2track.warn > i{ background:linear-gradient(90deg,#b7791f,#f0b429) }
+.v2track.bad  > i{ background:linear-gradient(90deg,#b02a37,#e35d6a) }
+
+/* 环图 */
+.v2ring{ display:flex; align-items:center; gap:14px }
+.v2ring svg{ flex:0 0 auto }
+.v2ring .rc{ flex:1; min-width:0; display:flex; flex-direction:column; gap:8px }
+.v2ring .rh{ font-size:11.5px; color:var(--dim) }
+.v2ring .rh b{
+  display:block; font-size:19px; color:var(--fg); font-weight:650;
+  letter-spacing:-.3px; line-height:1.2;
+}
+.v2legend{ display:flex; flex-direction:column; gap:6px }
+.v2legend div{ display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--dim) }
+.v2legend i{ width:7px; height:7px; border-radius:2px; flex:0 0 auto }
+.v2legend b{ margin-left:auto; color:var(--fg); font-weight:600; font-variant-numeric:tabular-nums }
+
+/* 工具标签云 */
+.v2chips{ display:flex; flex-wrap:wrap; gap:7px }
+.v2chip{
+  font-size:11.5px; padding:5px 10px; border-radius:999px;
+  background:var(--v2-foot-bg); border:1px solid var(--v2-line2); color:var(--dim);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.v2chip b{ color:var(--fg); font-weight:600 }
+.v2chip.v2bad{ background:var(--v2-bad-soft); border-color:var(--v2-bad-line) }
+.v2chip.v2bad b{ color:var(--v2-bad) }
+.v2chip .ch{ font-size:10px; padding:1px 6px; border-radius:999px; background:var(--v2-ok-soft); color:var(--v2-ok) }
+
+/* 事件流 */
+.v2stream{ display:flex; flex-direction:column; gap:7px; max-height:270px; overflow:auto; padding-right:2px }
+.v2ev{
+  display:grid; grid-template-columns:auto 1fr; gap:2px 9px; align-items:baseline;
+  padding:8px 10px; border-radius:var(--v2-radius-sm);
+  background:var(--v2-foot-bg); border:1px solid var(--v2-line2);
+  border-left:2px solid var(--dim); animation:v2slide .34s cubic-bezier(.22,1,.36,1);
+}
+@keyframes v2slide{ from{ opacity:0; transform:translateX(-6px) } to{ opacity:1; transform:none } }
+.v2ev .t{ font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums; letter-spacing:-.2px }
+.v2ev .n{ font-size:11.5px; color:var(--fg); font-weight:600 }
+.v2ev .m{ grid-column:2; font-size:11px; color:var(--dim); display:flex; gap:7px; flex-wrap:wrap }
+.v2ev .m em{ font-style:normal; padding:1px 6px; border-radius:999px; background:var(--bg); border:1px solid var(--v2-line2) }
+.v2ev[data-k="对话"]{ border-left-color:#1a4eda }
+.v2ev[data-k="工具"]{ border-left-color:#0f9d6e }
+.v2ev[data-k="转人工"]{ border-left-color:#b7791f }
+.v2ev[data-k="合规拦截"]{ border-left-color:#d64550 }
+.v2ev[data-k="停用"]{ border-left-color:#d64550 }
+.v2ev[data-k="数字人"]{ border-left-color:#7c3aed }
+.v2empty{ font-size:11.5px; color:var(--dim); padding:12px 2px; text-align:center }
+
+/* 看板弹层 */
+#v2modal{
+  position:fixed; inset:0; z-index:900; display:none;
+  background:rgba(12,18,38,.42); align-items:center; justify-content:center; padding:26px;
+}
+#v2modal.on{ display:flex; animation:v2fade .2s ease }
+@keyframes v2fade{ from{ opacity:0 } to{ opacity:1 } }
+#v2modal .box{
+  background:var(--panel); border:1px solid var(--v2-line2); border-radius:18px;
+  width:min(1080px,96vw); max-height:90vh; overflow:auto;
+  box-shadow:0 30px 70px -28px rgba(10,20,50,.5);
+  animation:v2pop .26s cubic-bezier(.22,1,.36,1);
+}
+@keyframes v2pop{ from{ opacity:0; transform:translateY(10px) scale(.985) } to{ opacity:1; transform:none } }
+#v2modal .mh{
+  position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:10px;
+  padding:16px 20px; border-bottom:1px solid var(--v2-line2); background:var(--panel);
+}
+#v2modal .mh h2{ margin:0; font-size:15px; font-weight:650 }
+#v2modal .mh .x{
+  margin-left:auto; cursor:pointer; border:1px solid var(--v2-line2);
+  background:var(--v2-foot-bg); color:var(--fg); border-radius:999px;
+  padding:5px 13px; font-size:12px;
+}
+#v2modal .mb{ padding:18px 20px 22px; display:grid; grid-template-columns:1fr 1fr; gap:16px }
+#v2modal .mfull{ grid-column:1/-1 }
+@media (max-width:900px){ #v2modal .mb{ grid-template-columns:1fr } }
+#v2modal .v2card{ box-shadow:none }
+
+/* ---------- 6. 数字人起始画面（预设画面，替掉启动期蓝屏） ---------- */
+body[data-v2t] .avatar{ border-radius:var(--v2-radius); box-shadow:var(--v2-glow), var(--v2-shadow) }
+#v2poster{
+  position:absolute; inset:0; z-index:4; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:14px; text-align:center; padding:22px;
+  animation:v2fade .35s ease; transition:opacity .5s ease;
+}
+#v2poster.off{ opacity:0; pointer-events:none }
+body[data-v2t="light"] #v2poster{
+  background:
+    radial-gradient(58% 52% at 50% 30%, rgba(59,129,246,.16) 0%, rgba(255,255,255,0) 68%),
+    linear-gradient(158deg,#f7faff 0%,#e9f0fe 55%,#f4f8ff 100%);
+}
+body[data-v2t="dark"] #v2poster{
+  background:
+    radial-gradient(60% 54% at 50% 28%, rgba(91,140,255,.24) 0%, rgba(11,16,32,0) 70%),
+    radial-gradient(90% 80% at 50% 110%, rgba(168,85,247,.14) 0%, rgba(11,16,32,0) 70%);
+}
+#v2poster .halo{
+  position:relative; width:132px; height:132px; border-radius:50%;
+  display:grid; place-items:center; flex:0 0 auto;
+  background:conic-gradient(from 210deg, #1a4eda, #3b81f6, #7c3aed, #1a4eda);
+  box-shadow:0 16px 40px -18px rgba(26,78,218,.55);
+  animation:v2spin 9s linear infinite;
+}
+body[data-v2t="dark"] #v2poster .halo{ box-shadow:0 16px 44px -16px rgba(59,129,246,.7) }
+@keyframes v2spin{ to{ transform:rotate(360deg) } }
+#v2poster .halo::before{
+  content:""; position:absolute; inset:3px; border-radius:50%;
+  background:linear-gradient(160deg,#ffffff,#eef3ff);
+}
+body[data-v2t="dark"] #v2poster .halo::before{ background:linear-gradient(160deg,#1b2450,#0e1430) }
+#v2poster .fig{ position:relative; width:64px; height:64px; animation:v2spinr 9s linear infinite }
+@keyframes v2spinr{ to{ transform:rotate(-360deg) } }
+#v2poster .fig i{ position:absolute; display:block; background:linear-gradient(180deg,#1a4eda,#3b81f6) }
+body[data-v2t="dark"] #v2poster .fig i{ background:linear-gradient(180deg,#8fb0ff,#5b8cff) }
+#v2poster .fig i.h{ width:24px; height:24px; border-radius:50%; left:20px; top:2px }
+#v2poster .fig i.b{ width:52px; height:30px; left:6px; top:30px; border-radius:26px 26px 8px 8px }
+#v2poster .cap{ display:flex; flex-direction:column; gap:5px; align-items:center }
+#v2poster .b1{ font-size:14.5px; font-weight:650; color:var(--fg); letter-spacing:.4px }
+#v2poster .b2{ font-size:12px; color:var(--dim); max-width:420px; line-height:1.6 }
+#v2poster .pw{ display:flex; align-items:center; gap:10px; font-size:12px; color:var(--dim) }
+#v2poster .pw .track{ width:170px; height:4px; border-radius:999px; background:var(--v2-track-bg); overflow:hidden }
+#v2poster .pw .track > i{
+  display:block; height:100%; width:34%; border-radius:999px;
+  background:linear-gradient(90deg,#1a4eda,#3b81f6);
+  animation:v2walk 1.5s cubic-bezier(.5,0,.5,1) infinite;
+}
+@keyframes v2walk{ 0%{ transform:translateX(-100%) } 100%{ transform:translateX(320%) } }
+#v2poster .tags{ display:flex; gap:7px; flex-wrap:wrap; justify-content:center; margin-top:2px }
+#v2poster .tags span{
+  font-size:11px; padding:4px 10px; border-radius:999px;
+  background:var(--panel); color:var(--dim); border:1px solid var(--v2-line2);
+}
+#v2poster.static .halo, #v2poster.static .fig{ animation:none }
+#v2poster.static .pw .track > i{ animation:none; width:100%; opacity:.35 }
+
+/* ---------- 7. 原组件质感提升 ---------- */
+body[data-v2t] .card, body[data-v2t] .report{ border-radius:var(--v2-radius-sm); box-shadow:var(--v2-shadow) }
+body[data-v2t] .acts button, body[data-v2t] .viewbar button, body[data-v2t] .quick button{
+  border-radius:999px; transition:transform .15s ease, box-shadow .2s ease, background .2s ease;
+}
+body[data-v2t] .acts button:hover, body[data-v2t] .quick button:hover{
+  transform:translateY(-1px); box-shadow:var(--v2-shadow);
+}
+body[data-v2t] #send{ border-radius:999px; background:linear-gradient(154deg,#1a4eda,#3b81f6); border-color:transparent }
+body[data-v2t] .msg{ animation:v2rise .3s cubic-bezier(.22,1,.36,1) }
+@keyframes v2rise{ from{ opacity:0; transform:translateY(6px) } to{ opacity:1; transform:none } }
+body[data-v2t] .states .chip{ border-radius:999px }
+body[data-v2t] .subtitle{
+  border-radius:var(--v2-radius-sm); border-left:3px solid var(--accent); background:var(--v2-foot-bg);
+}
+
+/* ---------- 8. 语音交互入口：默认开启、随时可关、点进来就看得到 ---------- */
+#v2voice{
+  display:flex; align-items:center; gap:14px; padding:13px 15px;
+  border-radius:var(--v2-radius); border:1px solid var(--v2-line2);
+  background:var(--v2-foot-bg); box-shadow:var(--v2-shadow);
+  transition:border-color .25s ease, background .25s ease;
+}
+#v2voice.on{
+  border-color:#3b81f6; border-width:2px;
+  background:linear-gradient(150deg,#eef4ff,#dbe7fe);
+  box-shadow:0 10px 30px -16px rgba(26,78,218,.45);
+}
+body[data-v2t="dark"] #v2voice.on{
+  border-color:#3b81f6; background:linear-gradient(150deg,#17244f,#0f1734);
+  box-shadow:0 10px 30px -16px rgba(59,129,246,.6);
+}
+#v2voice.wait{
+  border-color:var(--v2-warn-line); border-width:2px; background:var(--v2-warn-soft);
+}
+#v2vBtn{
+  display:flex; align-items:center; gap:14px; cursor:pointer; flex:1 1 auto; min-width:0;
+  border:0; background:transparent; padding:0; text-align:left; font:inherit; color:var(--fg);
+}
+#v2vMic{
+  width:52px; height:52px; border-radius:50%; display:grid; place-items:center;
+  flex:0 0 auto; font-size:24px; line-height:1; color:#fff;
+  background:linear-gradient(154deg,#1a4eda,#3b81f6);
+  box-shadow:0 8px 22px -10px rgba(26,78,218,.75);
+}
+#v2voice.on #v2vMic{ animation:v2vpulse 1.9s ease-in-out infinite }
+@keyframes v2vpulse{
+  0%,100%{ box-shadow:0 8px 22px -10px rgba(26,78,218,.75), 0 0 0 0 rgba(59,129,246,.5) }
+  50%{ box-shadow:0 8px 22px -10px rgba(26,78,218,.75), 0 0 0 14px rgba(59,129,246,0) }
+}
+/* 引导气泡：会轻微上下跳的 CTA；首次真正开麦后由 JS 收掉 */
+#v2vhint{
+  flex:0 0 auto; cursor:pointer; user-select:none;
+  padding:8px 14px; border-radius:999px; font-size:12.5px; font-weight:700;
+  color:#fff; background:linear-gradient(154deg,#1a4eda,#3b81f6);
+  box-shadow:0 10px 26px -12px rgba(26,78,218,.85);
+  animation:v2bounce 1.5s ease-in-out infinite; white-space:nowrap;
+}
+@keyframes v2bounce{
+  0%,100%{ transform:translateY(0) }
+  50%{ transform:translateY(-5px) }
+}
+/* 未被使用前，整条入口持续呼吸发光，把它从整页里"拎"出来 */
+#v2voice.spot{ animation:v2spot 2.3s ease-in-out infinite }
+@keyframes v2spot{
+  0%,100%{ box-shadow:0 0 0 0 rgba(59,129,246,.5), var(--v2-shadow) }
+  50%{ box-shadow:0 0 0 9px rgba(59,129,246,0), var(--v2-shadow) }
+}
+#v2voice.off #v2vhint{ display:none }
+#v2voice.wait #v2vMic{
+  background:linear-gradient(154deg,#b7791f,#f0b429); color:#fff;
+  box-shadow:0 8px 22px -10px rgba(183,121,31,.7); animation:none;
+}
+#v2voice.off #v2vMic{ background:var(--v2-track-bg); color:var(--dim); box-shadow:none; animation:none }
+#v2voice.on #v2vMic.listening{ background:linear-gradient(154deg,#b02a37,#e35d6a) }
+/* 关键：.t/.s 是 span，必须显式 display:block/flex，否则标题和副文案会挤在同一行 */
+#v2vT{ display:flex; flex-direction:column; gap:3px; min-width:0 }
+#v2vT .t{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  font-size:16px; font-weight:700; color:var(--fg); letter-spacing:.2px; line-height:1.25;
+}
+#v2vT .s{ display:block; font-size:11.5px; color:var(--dim); line-height:1.5 }
+/* 麦克风权限徽标：把"开页已申请权限"这件事变成看得见的状态 */
+#v2vPerm{
+  font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:999px;
+  border:1px solid var(--v2-line2); color:var(--dim); background:var(--v2-foot-bg);
+  white-space:nowrap; letter-spacing:0;
+}
+#v2vPerm.ok{ color:var(--v2-ok); border-color:var(--v2-ok-line); background:var(--v2-ok-soft) }
+#v2vPerm.warn{ color:var(--v2-warn); border-color:var(--v2-warn-line); background:var(--v2-warn-soft) }
+#v2vPerm.bad{ color:var(--v2-bad); border-color:var(--v2-bad-line); background:var(--v2-bad-soft) }
+#v2vSw{
+  flex:0 0 auto; cursor:pointer; border-radius:999px; padding:10px 18px;
+  font-size:13px; font-weight:600; white-space:nowrap;
+  border:1px solid var(--v2-line2); background:var(--panel); color:var(--fg);
+  transition:transform .15s ease, background .2s ease;
+}
+#v2vSw:hover{ transform:translateY(-1px) }
+#v2voice.on #v2vSw{ background:#141414; color:#fff; border-color:#141414 }
+/* 行动层里的语音按钮提为主按钮，在一排 ghost 里一眼可辨 */
+body[data-v2t] .acts #btnMic{
+  background:linear-gradient(154deg,#1a4eda,#3b81f6) !important;
+  border:1px solid transparent !important; color:#fff !important; font-weight:600;
+  box-shadow:0 8px 20px -12px rgba(26,78,218,.85);
+}
+body[data-v2t] .acts #btnMic.mic-on{
+  background:linear-gradient(154deg,#b02a37,#e35d6a) !important;
+  animation:v2vpulse 1.9s ease-in-out infinite;
+}
+body[data-v2t] .acts #btnMic:hover{ transform:translateY(-1px) }
+@media (max-width:880px){
+  #v2voice{ flex-wrap:wrap }
+  #v2vT .t{ font-size:15px }
+  #v2vSw{ width:100%; text-align:center }
+}
+
+/* ---------- 9. 窄屏塌缩 ---------- */
+@media (max-width:1360px){ body[data-v2t] main{ grid-template-columns:264px minmax(0,1fr) 312px } }
+@media (max-width:1180px){
+  body[data-v2t] main{
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto;
+    grid-template-areas:"stage" "chat" "right" "left";
+    height:auto; overflow:visible; row-gap:14px;
+  }
+  body[data-v2t] main > section.stage{ grid-area:stage; overflow:visible }
+  body[data-v2t] main > section.chat{ grid-area:chat }
+  body[data-v2t] aside#v2right{ grid-area:right }
+  body[data-v2t] aside#v2left{ grid-area:left; flex-direction:row; flex-wrap:wrap }
+  body[data-v2t] aside#v2left > .v2card{ flex:1 1 260px }
+}
+@media (max-width:880px){
+  body[data-v2t] main{ grid-template-columns:minmax(0,1fr); grid-template-areas:"stage" "chat" "right" "left" }
+  body[data-v2t] #v2bar{ width:100%; margin-left:0; justify-content:flex-start }
+  #v2poster .halo{ width:104px; height:104px }
+}
+/* ---------- 11. 手机竖屏（≤880px）：一屏内够得到语音入口和输入框 ----------
+   原媒体查询只把四栏折成一列，顺序对了，但 #log 随消息无限长高（实测 414 宽下
+   1088px），把输入框顶到页面 2868px 处——客户得往下滑三屏才能打字。
+   三条规则：数字人让位、记录区内滚、输入框钉底。 */
+@media (max-width:880px){
+  main > section.stage, main > section.chat, main > aside#v2left, main > aside#v2right{ width:100%; min-width:0 }
+  /* ① 数字人别占整屏 */
+  #avatar{ height:min(38vh,300px) !important }
+  /* ② 对话记录自己在框里滚，别把输入框往下推 */
+  main > section.chat{ max-height:76vh }
+  main > section.chat #log{ max-height:40vh; min-height:170px; overflow-y:auto }
+  /* ③ 输入框常驻屏幕底部，滚到哪都够得到 */
+  main > section.chat footer{
+    position:sticky; bottom:0; z-index:6;
+    background:var(--panel); border-top:1px solid var(--line);
+    border-radius:0 0 var(--v2-radius) var(--v2-radius);
+  }
+  header{ padding-bottom:6px }
+  #v2bar{ margin-top:2px }
+}
+
+/* ---------- 12. 全屏 = 只看数字人 + 直接语音对话 ----------
+   原脚本点全屏会把整个 section.stage 放大，工具栏/状态条/体检按钮一起上屏——不是"看数字人"。
+   这里在全屏态把非画面元素全摘掉，只留：数字人铺满 + 语音入口浮层 + 播报字幕 + 退出键。
+   语音对话本身沿用原脚本的 VOICE_LOOP（全屏自动开麦、答完自动回听、退出自动关麦），不另造一套。 */
+#v2fsExit{
+  display:none; position:fixed; right:16px; top:14px; z-index:60; cursor:pointer;
+  align-items:center; gap:7px; padding:9px 15px; border-radius:999px;
+  font:600 13px/1 inherit; color:#fff; background:rgba(10,14,24,.6);
+  border:1px solid rgba(255,255,255,.3); backdrop-filter:blur(10px);
+}
+#v2fsExit:hover{ background:rgba(10,14,24,.86) }
+body.v2fs #v2fsExit{ display:flex }
+section.stage:fullscreen{ padding:0; gap:0; background:#05070d; overflow:hidden !important }
+section.stage:fullscreen .viewbar,
+section.stage:fullscreen #states,
+section.stage:fullscreen .acts,
+section.stage:fullscreen .embody,
+section.stage:fullscreen #tools,
+section.stage:fullscreen #micLevel{ display:none !important }
+section.stage:fullscreen #avatar{ flex:1 1 auto; height:auto !important; border-radius:0; background:transparent }
+section.stage:fullscreen #v2poster .halo{ width:168px; height:168px }
+/* 播报字幕贴底 */
+section.stage:fullscreen .subtitle{
+  position:fixed; left:0; right:0; bottom:0; z-index:30; margin:0; height:auto;
+  min-height:0; max-height:24vh; border:0; border-radius:0; font-size:17px; padding:14px 22px;
+  background:linear-gradient(0deg,rgba(4,7,14,.94),rgba(4,7,14,.5)); color:#eef2ff;
+}
+/* 语音入口浮在画面下方：全屏时唯一的操作控件 */
+section.stage:fullscreen #v2voice{
+  position:fixed; left:50%; transform:translateX(-50%); z-index:31;
+  bottom:clamp(92px,20vh,186px); width:min(660px,92vw);
+  background:rgba(255,255,255,.94); backdrop-filter:blur(14px);
+}
+section.stage:fullscreen #micBanner,
+section.stage:fullscreen #netBanner,
+section.stage:fullscreen #humanBanner{
+  position:fixed; left:50%; transform:translateX(-50%); z-index:32;
+  width:min(660px,92vw); margin:0; top:64px;
+}
+
+@media (prefers-reduced-motion:reduce){
+  #v2poster .halo, #v2poster .fig, .v2track > i::after, .v2dot.live{ animation:none !important }
+  .v2card, .v2ev, .msg, #v2modal .box{ animation:none !important; transition:none !important }
+}
+
+</style>
+</head>
+<body>
+<header>
+  <h1>KB-Embodied-Agent</h1>
+  <span class="sub">企业知识库具身客服 · 演示（2026 上海开源软件应用创新大赛参赛作品）</span>
+  <span class="badge" id="modeBadge">连接中…</span>
+  <span class="badge" id="memBadge" title="会话记忆：多轮上下文 + 个性化档案">🧠 记忆 0 轮</span>
+  <a href="/agent.html" style="background:#166534;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px;margin-right:6px">🎧 人工坐席台</a>
+  <a href="/audit.html" style="background:#7c2d12;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px">🛡️ 合规红队测试台</a>
+</header>
+
+<main>
+  <section class="stage">
+    <div class="avatar round" id="avatar" data-state="Listen">
+      <div id="avatar-stage" style="width:100%;height:100%"></div>
+      <div class="face" id="face">虚拟形象<br><span style="font-size:11px">（离线演示：不使用星云实时驱动）</span></div>
+    </div>
+    <div class="viewbar">
+      <button class="ghost" id="btnFull">⛶ 全屏</button>
+      <button class="ghost" id="btnOrient">⇄ 横屏 / 竖屏</button>
+      <span class="hint" id="viewHint">画面区：数字人上线后可全屏、可切横竖屏</span>
+    </div>
+    <div class="states" id="states">
+      <span class="chip" data-s="Listen">聆听 Listen</span>
+      <span class="chip" data-s="Think">思考 Think</span>
+      <span class="chip" data-s="Speak">播报 Speak</span>
+    </div>
+    <div class="subtitle" id="subtitle">点下面的问题，或直接输入，数字员工会开口回答并当场出卡片。</div>
+    <div class="acts">
+      <button class="ghost" id="btnSelfcheck">🩺 国标体检</button>
+      <button class="ghost" id="btnKbAudit">🗂 知识库体检</button>
+      <button class="ghost" id="btnAudit">🧾 操作留痕</button>
+      <button class="ghost" id="btnMic">🎤 语音输入</button>
+      <button class="ghost" id="btnStop">✋ 打断</button>
+      <button id="btnDemo" style="background:#7c2d12">🎬 自动演示</button>
+      <button class="ghost" id="btnA11y" title="大字号 + 高对比 + 语音优先，适老化与无障碍">👵 适老化/无障碍</button>
+      <button class="ghost" id="btnNet" title="模拟弱网/断网：数字人降级、恢复后自动重连">🌐 弱网演练</button>
+      <button class="danger" id="btnKill">⛔ 一键停</button>
+    </div>
+    <div class="humanbanner" id="humanBanner"></div>
+    <div class="netbanner" id="netBanner">🌐 弱网演练中：数字人已降级为文字 + 卡片版；网络恢复后自动重连</div>
+    <!-- 语音输入状态横幅：麦克风未授权/正在聆听都显式摆出来，避免"点了没反应"的观感 -->
+    <div class="micbanner" id="micBanner"></div>
+    <div class="miclevel" id="micLevel">
+      <span>🎙 麦克风电平</span>
+      <span class="track"><i id="micLevelBar"></i></span>
+      <span id="micLevelHint">未开启</span>
+    </div>
+    <!-- 具身状态看板：六类具身能力与对话事件的实时绑定（证明不是「文本框 + 形象」） -->
+    <div class="embody">
+      <div class="ehd">🎭 具身状态绑定（实时）
+        <span class="edim" id="embStat">等待事件…</span>
+      </div>
+      <div class="elog" id="embLog" aria-live="polite" aria-atomic="false"></div>
+    </div>
+    <div class="tools" id="tools">可用工具（行动层）：加载中…</div>
+  </section>
+
+  <section class="chat">
+    <div class="banner" id="killBanner">⛔ AI 已停用，所有请求已转人工直连。<span id="killAt"></span></div>
+    <div id="log"></div>
+    <div class="quick" id="quick"></div>
+    <footer>
+      <input type="text" id="input" placeholder="比如：国标要自查多少项？" autocomplete="off" />
+      <button id="send">发送</button>
+      <button class="ghost" id="voice" title="用浏览器语音播报">🔊</button>
+    </footer>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let SESSION = null, SPEAK = true, BUSY = false, AGENT = null;
+
+const QUICK = ["国标要自查多少项？", "什么时候必须转人工？", "知识库为什么总是不好用？", "交付一次要多久？", "帮我转人工"];
+
+
+// ================= 具身状态看板：六类具身能力与对话事件的实时绑定 =================
+function emb(kind, detail){
+  const box = document.getElementById("embLog"); if (!box) return;
+  const C = {Listen:"#22c55e",Think:"#3b82f6",Speak:"#a855f7",Emotion:"#f59e0b",
+             KA:"#ec4899",Interrupt:"#ef4444",Reconnect:"#06b6d4",Action:"#14b8a6",A11y:"#94a3b8"};
+  const d = document.createElement("div");
+  d.className = "erow";
+  const ts = new Date().toTimeString().slice(0, 8);
+  d.innerHTML = '<span class="et">' + ts + '</span><span class="ek" style="color:' + (C[kind] || "#8b949e") + '">' +
+                kind + '</span><span class="ed">' + String(detail || "").replace(/[<>]/g, "") + '</span>';
+  box.appendChild(d); box.scrollTop = box.scrollHeight;
+  const st = document.getElementById("embStat");
+  if (st) st.textContent = kind + (detail ? "：" + detail : "");
+}
+
+// ---- 适老化 / 无障碍模式（普惠加分项）----
+document.getElementById("btnA11y").onclick = function(){
+  const on = document.body.classList.toggle("a11y");
+  this.textContent = on ? "👵 适老化：已开启" : "👵 适老化/无障碍";
+  document.getElementById("log").setAttribute("aria-live", "polite");
+  say("已切换到" + (on ? "适老化无障碍模式，字更大、对比更强。" : "标准显示模式。"));
+  emb("A11y", on ? "开启：大字号 + 高对比 + 字幕常驻 + 语音优先" : "关闭");
+  // 语音优先：开启适老化时真去开麦（不会打字的用户应当直接说话）
+  if (on && AGENT && !MIC.on) setTimeout(() => { if (!MIC.on) toggleMic(); }, 400);
+  else if (!on && MIC.on) toggleMic();
+};
+
+// ---- 弱网 / 断网：降级 + 自动重连 ----
+let NET_SIM = false;
+function netBanner(show, text, html){
+  // html=true 时按 HTML 注入（用于「点这里重试」这类可点元素）；
+  // 默认 false 走 textContent，保持既有调用与外部文本的安全性。
+  const b = document.getElementById("netBanner");
+  if (text != null && text !== ""){
+    if (html) b.innerHTML = text; else b.textContent = text;
+  }
+  b.style.display = show ? "block" : "none";
+}
+document.getElementById("btnNet").onclick = function(){
+  NET_SIM = !NET_SIM;
+  this.textContent = NET_SIM ? "🌐 恢复网络" : "🌐 弱网演练";
+  if (NET_SIM){
+    netBanner(true, "🌐 弱网演练中：数字人链路降级，文字 + 卡片版照常可用");
+    emb("Reconnect", "模拟断网：数字人降级，问答链路不受影响");
+  } else {
+    netBanner(false);
+    emb("Reconnect", "网络恢复：自动重连数字人");
+    tryReconnect();
+  }
+};
+window.addEventListener("offline", ()=>{ netBanner(true, "🌐 检测到网络断开：已自动降级为文字 + 卡片版"); emb("Reconnect","offline 事件 → 降级"); });
+window.addEventListener("online",  ()=>{ netBanner(false); emb("Reconnect","online 事件 → 自动重连"); tryReconnect(); });
+async function tryReconnect(){
+  try{
+    if (AGENT && typeof AGENT.reconnect === "function"){ await AGENT.reconnect(); emb("Reconnect","已下发重连指令"); }
+  }catch(e){ emb("Reconnect","重连未成功：" + ((e && e.message) || e)); }
+}
+// ---- 数字人连接失败必须被看见（修「数字人没打开，屏幕上一个字都没有」）----
+// 背景：SDK 在「网关鉴权失败 / 网关不可达 / 字段未识别」时走的是 onMessage 回调，
+// 并 return null（既不 reject，也不抛异常）。此前 onMessage 只 console.warn，
+// 于是会话建不起来时页面毫无提示、占位符一直挂着 —— 用户只会报「数字人没打开」。
+let AVATAR_FAILED = false, AVATAR_DOWN = false, AVATAR_TIMER = 0;
+const AVATAR_WAIT_MS = 8000;                 // 超过这个时间还没画面，就当连接失败
+const XMOV_ERR_HINT = {
+  // —— 会话/连接类（这一类必须判失败，用户要立刻知道）——
+  10001: "找不到数字人容器（页面元素缺失）",      3101: "找不到数字人容器（页面元素缺失）",
+  10002: "连不上厂商实时通道（网关不可达）",      3102: "连不上厂商实时通道（网关不可达）",
+  10003: "会话建立失败：多为应用凭证无效或未授权 —— 请检查 XMOV_APP_ID / XMOV_APP_SECRET 是否为真实值",
+  10004: "会话关闭异常（厂商侧结束）",            3104: "会话关闭异常（厂商侧结束）",
+  10005: "SDK 初始化失败",                        3105: "SDK 初始化失败",
+  10006: "实时通道已退出（可能被厂商侧结束）",    3106: "实时通道已退出（可能被厂商侧结束）",
+  10007: "实时通道断开（网络中断或被厂商侧断开）", 3107: "实时通道断开（网络中断或被厂商侧断开）",
+  // —— 素材/形象类 ——
+  30001: "背景素材加载失败",                       30002: "数字人形象数据加载失败（角色 ID 可能不存在）",
+  30004: "数字人视频素材下载失败",                 30005: "数字人形象数据已过期（请到控制台确认应用与角色）",
+  30006: "播报动作已过期",                         30007: "语音播报已过期",
+  40001: "音频解码失败",                           40002: "人脸数据解码失败",
+  60001: "WebGL 上下文丢失（显卡/浏览器渲染异常）",
+};
+// 断网类：交给已有的 offline/重连链路处理，不在这里判死
+const XMOV_NET_ERR = new Set([50001, 50003, 50004]);      // NETWORK_DOWN / RETRY / BREAK
+// 恢复类：收到即清掉失败态，让数字人回到正常显示
+const XMOV_NET_OK  = new Set([50002]);                     // NETWORK_UP
+function xmovReason(code, message){
+  const c = Number(code);
+  if (XMOV_ERR_HINT[c]) return XMOV_ERR_HINT[c];
+  const m = String(message || "").replace(/^Error:\s*/, "").trim();
+  if (m) return m;
+  return code ? ("厂商返回错误码 " + code) : "星云实时会话未能建立";
+}
+// 是否真的有画面（占位符还在 = 没画面）
+function avatarVisible(){
+  const f = $("#face");
+  return !!(f && f.style.display === "none");
+}
+function avatarFail(reason, code){
+  if (AVATAR_FAILED) return;
+  AVATAR_FAILED = true;
+  clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;
+  const safe = String(reason || "未知原因").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  // ① 顶部横幅：真实原因 + 一键重试（不再静默）
+  netBanner(true, "🎭 数字人未能开启：" + safe +
+    ' · 文字 + 卡片版照常可用 · <b style="cursor:pointer;text-decoration:underline" onclick="retryAvatar()">点这里重试</b>',
+    true);                                   // 需要可点，故按 HTML 注入
+  // ② 形象位：把原因写上去，替掉那句会误导人的「离线演示」占位
+  const f = $("#face");
+  if (f){
+    f.style.display = "";
+    f.innerHTML = "数字人未能开启<br><span style='font-size:11px'>" + safe +
+      "<br>文字 + 卡片版照常可用</span>";
+  }
+  // ③ 角标 + 对话各留一处，任何视线落点都能看到
+  const b = $("#modeBadge");
+  if (b){ b.textContent = "文字 + 卡片版（数字人未连接）"; b.className = "badge text"; }
+  bubble("bot", "数字人未能开启：" + reason + "。文字问答 + 卡片交付不受影响。",
+         code ? ("错误码 " + code) : "");
+  emb("AvatarFail", String(reason).slice(0, 60));
+  // 真停：倒计时每秒会覆写角标，不停的话刚写的失败角标马上又被盖回「剩余 x:xx」
+  if (AV_TTL_TIMER){ clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null; }
+  // 数字人都起不来，就没必要再维持心跳占着服务端名额（停跳即由服务端释放）
+  if (typeof stopKeepalive === "function") stopKeepalive();
+}
+// 重试：重新加载 SDK（名额被占 / 网络抖动时有效；凭证类错误重试也不会好，但原因会写清）
+function retryAvatar(){
+  if (!(SESSION && SESSION.sdk_url)){ location.reload(); return; }
+  AVATAR_FAILED = false;
+  AVATAR_DOWN = false;
+  clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;
+  netBanner(false);
+  const f = $("#face");
+  if (f){ f.style.display = ""; f.innerHTML = "正在重连数字人…"; }
+  emb("AvatarRetry", "用户点重试");
+  loadSdk(SESSION.sdk_url, SESSION.avatar || {});
+}
+
+
+// ================= 自动演示（导演模式）：按 7 段脚本驱动整页，屏上带旁白字幕 =================
+let DEMO_RUNNING = false;
+function cap(step, text, on){
+  const el = document.getElementById("caption");
+  if (!el) return;
+  if (on === false){ el.className = "caption"; return; }
+  el.className = "caption on";
+  el.innerHTML = '<span class="step">' + (step || "") + '</span>' + (text || "");
+}
+function tip(html, on){
+  let el = document.getElementById("demotip");
+  if (!el){ el = document.createElement("div"); el.id = "demotip"; el.className = "demotip"; document.body.appendChild(el); }
+  el.className = "demotip" + (on === false ? "" : " on");
+  el.innerHTML = html || "";
+}
+const dwait = ms => new Promise(r => setTimeout(r, ms));
+async function dask(text, waitMs){
+  const i = document.getElementById("input");
+  // 防御：若上一轮的 BUSY 锁卡住（例如接管时请求被中断），演示会被静默吞掉 → 这里超时解锁
+  let t0 = Date.now();
+  while (BUSY && Date.now() - t0 < 20000){ await dwait(500); }
+  if (BUSY){ BUSY = false; cap("恢复", "检测到 BUSY 锁卡住，已自动解锁继续演示"); await dwait(600); }
+  i.value = text; document.getElementById("send").click();
+  await dwait(waitMs || 7000);
+}
+async function dclick(id, waitMs){
+  const b = document.getElementById(id);
+  if (b) b.click();
+  await dwait(waitMs || 1500);
+}
+async function waitFor(fn, timeout){
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout){
+    try{ if (fn()) return true; }catch(e){}
+    await dwait(600);
+  }
+  return false;
+}
+
+async function autoDemo(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  document.getElementById("btnDemo").textContent = "🎬 演示进行中…";
+  try{
+    cap("段 1 / 7 · 开场定位", "<b>KB-Embodied-Agent</b>：企业知识库具身客服 —— 别人做的是会说人话的数字人，我们让数字人成为标准的执行者。");
+    await say("你好，我是企业知识库数字员工，我可以查知识库、出卡片、也能随时把您转给真人同事。", {emotion:"happy", ka:"Hello"});
+    await dwait(9000);
+
+    cap("段 2 / 7 · 数字人答疑（RAG 检索 + 大模型）", "客户口述提问 → 检索企业知识库 → 大模型只依据资料作答；资料不足不编造，先反问引导，必要时才转人工。");
+    await dask("知识库为什么总是不好用？", 11000);
+
+    cap("段 3 / 7 · 行动层：不只是能对话，还能办事", "同一个入口直接出可操作卡片：合规清单卡、报价卡，而不是一堆文字。");
+    await dask("国标要自查多少项？", 11000);
+    await dask("交付一次要多久？", 10000);
+
+    cap("段 4 / 7 · 合规体检 + 信任层（可审计）", "国标 61 项逐条对照出整改清单；一键停可以全站停 AI 转人工；每次问答都留痕可回查。");
+    await dclick("btnSelfcheck", 9000);
+    await dclick("btnAudit", 6000);
+
+    cap("段 5 / 7 · 真转人工：出工单、人工接管、AI 暂停", "转人工不是出一张卡 —— 先生成真工单，坐席接管后 AI 暂停应答，客户不必再重复一遍。");
+    tip("<b>请到「人工坐席台」标签页操作：</b><br>1）点左侧工单 → <b>接入会话</b><br>2）输入一句回复并发送<br>3）点 <b>↩ 转数字客服</b><br><br>完成后本页会自动继续。");
+    await dask("帮我转人工", 6000);
+    const got = await waitFor(() => {
+      const st = document.querySelector("#log .card .tkstate");
+      return st && st.textContent.indexOf("接管") >= 0;
+    }, 60000);
+    if (!got){ cap("段 5 / 7 · 真转人工", "（未检测到坐席接入，继续演示。）"); }
+    await dwait(6000);
+    tip("", false);
+    await waitFor(() => document.getElementById("humanBanner").className.indexOf("on") < 0, 90000);
+    await dwait(9000);
+
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "记得住客户（不用重复说）、一键适老化、断网自动降级并重连。");
+    try{
+      await waitFor(() => !HANDOFF || HANDOFF.status === "released", 15000);
+      await dwait(2500);
+      await dask("我叫龙建洲，做小微企业知识库的，国标要自查多少项？", 11000);
+      await dask("我刚才说我叫什么？", 9000);
+      await dclick("btnA11y", 7000);
+      await dclick("btnA11y", 2500);
+      await dclick("btnNet", 6000);
+    }catch(e){
+      cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "（本段跳过：" + ((e && e.message) || e) + "）");
+      await dwait(1500);
+    }
+
+    cap("段 7 / 7 · 合规红队测试台（本作品最原创的一环）", "由红队客户数字人按国标条款发难、AI 客服应答、自动出可交付测试报告；含反向用例，防止『什么都转人工』作弊。");
+    await dwait(3000);
+    try{ releaseAvatar("goto-redteam"); }catch(e){}   // 先释放数字人线路，保证红队台两路可用
+    await dwait(1500);
+    location.href = "/audit.html?auto=1";
+  }catch(e){
+    cap("演示中断", "（" + ((e && e.message) || e) + "）");
+  }finally{
+    DEMO_RUNNING = false;
+    const b = document.getElementById("btnDemo");
+    if (b) b.textContent = "🎬 自动演示";
+  }
+}
+document.getElementById("btnDemo").onclick = autoDemo;
+// ?auto=6 → 只跑第 6 段（记忆/个性化 · 适老化 · 弱网降级），录制补拍用
+async function demo6(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  try{
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "记得住客户（不用重复说）、一键适老化、断网自动降级并重连。");
+    await dwait(2000);
+    await dask("我叫龙建洲，做小微企业知识库的", 11000);
+    await dask("我刚才说我叫什么？", 10000);
+    await dclick("btnA11y", 8000);
+    await dclick("btnA11y", 3000);
+    await dclick("btnNet", 8000);
+    cap("段 6 / 7 · 记忆与个性化 · 适老化 · 弱网降级", "答得出来（记得住）、看得清（大字号高对比）、断网也能自己接回来。");
+    await dwait(4000);
+  }catch(e){}
+  DEMO_RUNNING = false;
+}
+// ?auto=9 → 只跑「智能引导」补拍段：未命中先引导，不滥用转人工
+async function demo9(){
+  if (DEMO_RUNNING) return;
+  DEMO_RUNNING = true;
+  try{
+    cap("补拍段 · 智能引导：答不上的先引导，不推给人工", "知识库没有依据时，它先得体回应并把话题拉回业务；信息说不清楚就反问一句，把真实需求问出来——而不是一句「转人工」把客户打发走。");
+    await dwait(2000);
+    await dask("今天天气怎么样？", 11000);
+    await dask("帮我看看这个", 11000);
+    cap("补拍段 · 智能引导", "只有客户明确要人工，或涉及投诉与高风险，它才转人工。");
+    await dwait(5000);
+  }catch(e){}
+  DEMO_RUNNING = false;
+}
+// ?auto=1 → 打开即自动开演（录制用：地址栏粘一次网址即可，不用找按钮）
+function autoDemoStart(){ try{ autoDemo(); }catch(e){} }
+if (location.search.indexOf("auto=9") >= 0){
+  const t9 = setInterval(() => {
+    const b = document.getElementById("modeBadge");
+    if (b && b.textContent.indexOf("连接中") < 0){
+      clearInterval(t9);
+      setTimeout(() => { try{ demo9(); }catch(e){} }, 14000);
+    }
+  }, 1000);
+}
+else if (location.search.indexOf("auto=6") >= 0){
+  setTimeout(() => { try{ demo6(); }catch(e){} }, 14000);
+}
+else if (location.search.indexOf("auto=1") >= 0){
+  const t0 = setInterval(() => {
+    // 以 DOM 就绪为准（徽标不再"连接中"），不依赖变量作用域
+    const b = document.getElementById("modeBadge");
+    if (b && b.textContent.indexOf("连接中") < 0){
+      clearInterval(t0);
+      setTimeout(autoDemoStart, 14000);  // 再等数字人连线与首帧渲染
+    }
+  }, 1000);
+}
+
+
+function setState(s, all){
+  $("#avatar").dataset.state = s;
+  emb(s, "具身状态 → " + s);
+  document.querySelectorAll(".chip").forEach(c =>
+    c.classList.toggle("active", (all || [s]).includes(c.dataset.s)));
+}
+function bubble(cls, text, meta){
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  if (meta){ const m = document.createElement("div"); m.className="meta"; m.textContent = meta; d.appendChild(m); }
+  $("#log").appendChild(d);
+  $("#log").scrollTop = $("#log").scrollHeight;
+  return d;
+}
+function card(w){
+  emb("Action", "工具调用：" + (w.type || ""));
+  const el = document.createElement("div");
+  el.className = "card";
+  const h = document.createElement("h4"); h.textContent = w.title || w.type; el.appendChild(h);
+  const p = w.payload || {};
+  if (w.type === "checklist"){
+    const ul = document.createElement("ul");
+    (p.items || []).forEach(i => { const li = document.createElement("li"); li.textContent = i; ul.appendChild(li); });
+    el.appendChild(ul);
+  } else if (w.type === "quote"){
+    const kv = document.createElement("div"); kv.className = "kv";
+    kv.innerHTML = `<span>${p.sku || "商品"} × ${p.qty || 1}</span><b>${p.total || "-"}</b>`;
+    el.appendChild(kv);
+    const ul = document.createElement("ul");
+    ul.style.marginTop = "8px";
+    if (p.unit) { const li = document.createElement("li"); li.textContent = "单价 " + p.unit; ul.appendChild(li); }
+    el.appendChild(ul);
+  } else if (w.type === "handoff"){
+    const ul = document.createElement("ul");
+    const rows = [["转接原因", p.reason], ["目标队列", p.queue]];
+    rows.forEach(([k, v]) => { if (v){ const li = document.createElement("li"); li.textContent = k + "：" + v; ul.appendChild(li); } });
+    if (p.ticket && p.ticket.id){
+      const li = document.createElement("li");
+      li.innerHTML = "工单号：<b>" + p.ticket.id + "</b>（<span class='tkstate'>排队中</span>）";
+      ul.appendChild(li);
+      startHandoffPoll(p.ticket.id, el.querySelector(".tkstate"));
+    }
+    el.appendChild(ul);
+  } else {
+    const pre = document.createElement("pre"); pre.style.margin = "0";
+    pre.textContent = JSON.stringify(p, null, 2); el.appendChild(pre);
+  }
+  if (p.note){ const n = document.createElement("div"); n.className = "note"; n.textContent = p.note; el.appendChild(n); }
+  $("#log").appendChild(el);
+  $("#log").scrollTop = $("#log").scrollHeight;
+}
+// ================= 真转人工：客户侧轮询工单消息 + 可回复 =================
+let HANDOFF = null;
+function startHandoffPoll(tid, stateEl){
+  if (HANDOFF && HANDOFF.id === tid) return;
+  HANDOFF = {id: tid, since: 0, stateEl: stateEl, timer: null, status: "queued", agent: ""};
+  let lastMsg = "";
+  const tick = async () => {
+    if (!HANDOFF || HANDOFF.id !== tid) return;
+    try{
+      const d = await (await fetch("/api/handoff/messages?ticket=" + tid + "&since=" + HANDOFF.since)).json();
+      if (d.messages && d.messages.length){
+        d.messages.forEach(m => {
+          const key = m.ts + "|" + m.role + "|" + m.text;
+          if (key === lastMsg) return;
+          lastMsg = key;
+          if (m.role === "customer") return;              // 自己的话已显示
+          if (m.role === "system"){
+            if (stateEl) stateEl.textContent = m.text;
+            bubble("bot", m.text, "工单 " + tid);
+            emb("Action", "人工坐席事件：" + m.text);
+          } else if (m.role === "ai"){
+            // 数字客服主动接手问候：由数字人开口说，并同步字幕与具身事件
+            bubble("bot", m.text, "🤖 数字客服（已接手） · " + m.ts);
+            say(m.text, {emotion: "happy", ka: "Hello"});
+            emb("Speak", "数字客服主动问候：" + m.text.slice(0, 14));
+          } else {
+            bubble("human", m.text, "🎧 人工坐席 " + (d.agent || "") + " · " + m.ts);
+            say(m.text);
+          }
+        });
+        HANDOFF.since = d.total;
+      }
+      HANDOFF.status = d.status; HANDOFF.agent = d.agent || "";
+      // 客户页明确呈现"人工接管 / 交回数字客服"的状态切换
+      const hb = document.getElementById("humanBanner");
+      if (d.status === "queued"){ hb.className = "humanbanner on"; hb.textContent = "⏳ 正在为您转接人工坐席…（AI 仍在待命）"; }
+      else if (d.status === "active"){ hb.className = "humanbanner on"; hb.textContent = "🎧 人工坐席" + (d.agent ? " " + d.agent : "") + "已接管，AI 已暂停应答（数字人对话已断开）"; }
+      else if (d.status === "released"){
+        hb.className = "humanbanner"; HANDOFF = null;
+        bubble("bot", "人工坐席已将您转回数字客服，AI 恢复应答。", "工单 " + tid);
+        return;
+      }
+      else if (d.status === "closed"){
+        hb.className = "humanbanner"; HANDOFF = null;
+        bubble("bot", "人工服务已结束，感谢您的耐心等待。", "工单 " + tid);
+        return;
+      }
+      if (stateEl && d.status === "queued") stateEl.textContent = "排队中（等待坐席接入）";
+      else if (stateEl && d.status === "active") stateEl.textContent = "人工坐席" + (d.agent ? " " + d.agent : "") + "已接入";
+      else if (stateEl && d.status === "released") stateEl.textContent = "已交回数字客服";
+      else if (stateEl && d.status === "closed") stateEl.textContent = "会话已结束";
+    }catch(e){}
+    if (HANDOFF && HANDOFF.id === tid) HANDOFF.timer = setTimeout(tick, 2000);
+  };
+  tick();
+}
+async function handoffSay(text){
+  if (!HANDOFF) return false;
+  try{
+    await fetch("/api/handoff/say", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ticket: HANDOFF.id, text: text, role: "customer"})});
+    return true;
+  }catch(e){ return false; }
+}
+
+function speak(text){
+  if (!SPEAK || !window.speechSynthesis) return;
+  try { const u = new SpeechSynthesisUtterance(text); u.lang = "zh-CN"; u.rate = 1.05; speechSynthesis.speak(u); } catch(e){}
+}
+
+// ---------------------------------------------------------------- 体检 / 信任层 UI
+
+function reportCard(title, html){
+  const el = document.createElement("div");
+  el.className = "report";
+  el.innerHTML = `<h4>${title}</h4>${html}`;
+  $("#log").appendChild(el);
+  $("#log").scrollTop = $("#log").scrollHeight;
+  return el;
+}
+
+function downloadText(name, text){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type: "text/markdown;charset=utf-8"}));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+
+async function runSelfcheck(){
+  bubble("me", "帮我做一次国标体检");
+  setState("Think", ["Think"]);
+  const d = await (await fetch("/api/selfcheck", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})).json();
+  const s = d.summary;
+  const cls = d.verdict.indexOf("✅") >= 0 ? "var(--ok)" : (d.verdict.indexOf("⚠️") >= 0 ? "var(--warn)" : "#ff6b8a");
+  const todoRows = (d.todo || []).map(r =>
+    `<tr><td>${r.id}${r.is_veto ? " ★" : ""}</td><td class="${r.is_veto ? 'veto' : ''}">${r.requirement.replace(/^【一票项】/, "").slice(0, 30)}…</td><td>${r.status}</td><td>${r.how_to_fix.slice(0, 26)}…</td></tr>`).join("");
+  reportCard("🩺 国标体检报告（GB/T 47746—2026 · 61 项）", `
+    <div class="verdict" style="color:${cls}">${d.verdict}</div>
+    <div>${d.verdict_reason}</div>
+    <div style="margin-top:6px">满足 ${s.ok} ｜ 部分 ${s.partial} ｜ 不满足 ${s.bad} ｜ 「应」未满足 ${s.miss_mandatory} 项</div>
+    <div style="margin-top:8px;font-size:12px;color:var(--dim)">待整改 ${(d.todo || []).length} 项（★ = 一票项，任一不满足即整体不达标）：</div>
+    <table><tr><th>编号</th><th>要求</th><th>现状</th><th>整改动作</th></tr>${todoRows}</table>
+    <div style="margin-top:10px"><button class="ghost" id="dlReport">⬇ 导出整改清单（Markdown）</button></div>
+  `);
+  $("#dlReport").onclick = () => downloadText("国标整改清单.md", d.markdown);
+  $("#subtitle").textContent = "已完成国标体检：" + d.verdict;
+  speak(d.verdict + "。共 61 项自查，48 项必须做到，其中五类一票项最要紧。整改清单已生成，可一键导出。");
+  setTimeout(() => setState("Listen", ["Listen"]), 6500);
+}
+
+async function runKbAudit(){
+  bubble("me", "帮我做一次知识库体检");
+  setState("Think", ["Think"]);
+  const d = await (await fetch("/api/kb-audit", {method:"POST"})).json();
+  const gapRows = d.gaps.map(g => `<li>${g.q}</li>`).join("") || "<li>无缺口</li>";
+  reportCard("🗂 知识库体检报告", `
+    <div>语料文件 ${d.corpus_files} 个 ｜ 条目 ${d.corpus_entries} 条 ｜ 探针 ${d.probes} 问</div>
+    <div class="bar"><i style="width:${d.coverage}%"></i></div>
+    <div>覆盖率 <b>${d.coverage}%</b>（命中 ${d.covered}/${d.probes}）</div>
+    <div style="margin-top:8px;font-size:12px;color:var(--dim)">未覆盖（建议补料）：</div>
+    <ul style="margin:4px 0 0;padding-left:18px">${gapRows}</ul>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim)">${d.note}</div>
+  `);
+  $("#subtitle").textContent = `知识库覆盖率 ${d.coverage}%，发现 ${d.gaps.length} 处缺口。`;
+  speak(`知识库体检完成，覆盖率 ${d.coverage}%，发现 ${d.gaps.length} 处缺口，已按优先级列出补料清单。`);
+  setTimeout(() => setState("Listen", ["Listen"]), 6500);
+}
+
+async function runAuditLog(){
+  const d = await (await fetch("/api/audit?limit=12")).json();
+  const rows = d.items.map(i => {
+    const what = i.kind === "chat" ? `问答：${(i.text||"").slice(0,18)} → 命中 ${(i.sources||[]).join("/")||"无"}`
+      : i.kind === "selfcheck" ? `国标体检：${i.verdict}`
+      : i.kind === "kb-audit" ? `知识库体检：覆盖率 ${i.coverage}%`
+      : i.kind === "kill-switch" ? `一键停：${i.stopped ? "已停用" : "已恢复"}（${i.reason||""}）` : i.kind;
+    return `<tr><td>${i.ts}</td><td>${what}</td></tr>`;
+  }).join("");
+  reportCard("🧾 操作留痕（最近 12 条）", `<table><tr><th>时间</th><th>动作</th></tr>${rows || "<tr><td>—</td><td>暂无</td></tr>"}</table>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim)">每次问答/工具调用均落盘 logs/audit.jsonl——"出事了能说清"。</div>`);
+  speak("已列出最近的操作留痕，每一次问答和工具调用都有记录。");
+}
+
+async function toggleKill(){
+  const cur = await (await fetch("/api/kill")).json();
+  const next = !cur.stopped;
+  const d = await (await fetch("/api/kill", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({stopped: next, reason: next ? "演示：人工接管" : ""})})).json();
+  const b = $("#btnKill");
+  b.className = d.stopped ? "on" : "danger";
+  b.textContent = d.stopped ? "▶ 恢复 AI" : "⛔ 一键停";
+  $("#killBanner").className = "banner" + (d.stopped ? " show" : "");
+  $("#killAt").textContent = d.at ? "（" + d.at + "）" : "";
+  $("#subtitle").textContent = d.stopped ? "AI 已停用：现在所有请求直接转人工。" : "AI 已恢复：可以继续问答。";
+  speak(d.stopped ? "AI 已停用，现在所有请求都会直接转人工。" : "AI 已恢复服务。");
+}
+
+function initTrustUI(){
+  $("#btnSelfcheck").onclick = runSelfcheck;
+  $("#btnKbAudit").onclick = runKbAudit;
+  $("#btnAudit").onclick = runAuditLog;
+  $("#btnKill").onclick = toggleKill;
+  if ($("#btnMic")) $("#btnMic").onclick = toggleMic;
+  if ($("#btnStop")) $("#btnStop").onclick = doInterrupt;
+}
+
+// ---------------------------------------------------------------- 启动
+
+async function init(){
+  initTrustUI();
+  initViewUI();
+  QUICK.forEach(q => {
+    const b = document.createElement("button");
+    b.className = "ghost"; b.textContent = q;
+    b.onclick = () => send(q);
+    $("#quick").appendChild(b);
+  });
+  try{
+    SESSION = await (await fetch("/api/session", {method:"POST"})).json();
+    const mode = SESSION.mode;                 // offline | text | online
+    const av = SESSION.avatar || {};
+    const b = $("#modeBadge");
+    if (mode === "online" && av.enabled){
+      b.textContent = "数字人演示（限时开放）";
+      b.className = "badge online";
+      bubble("bot", "数字人演示已开启，本场限时 " + Math.round((av.ttl || 180) / 60) +
+             " 分钟。会话由服务端代建，浏览器只持有一次性凭证。");
+      startAvatarCountdown(av.ttl || 180);
+      startKeepalive();                       // 心跳：停跳即由服务端主动释放名额
+      loadSdk(SESSION.sdk_url, av);
+    } else {
+      b.textContent = mode === "offline" ? "离线演示模式（不消耗积分）" : "文字 + 卡片版";
+      b.className = "badge " + (mode === "offline" ? "offline" : "text");
+      $("#face").innerHTML = "数字人演示未开放<br><span style='font-size:11px'>文字 + 卡片版照常可用</span>";
+      bubble("bot", mode === "offline"
+        ? "离线演示模式已就绪：不走星云实时驱动，效果与链路与在线一致。"
+        : "已就绪：文字问答 + 卡片交付可用。" + (av.reason ? "数字人演示：" + av.reason + "。" : ""),
+        "会话 " + SESSION.session_id);
+    }
+  }catch(e){
+    $("#modeBadge").textContent = "后端未响应";
+    bubble("bot", "连不上后端（/api/session 失败）。请确认 docker compose 或本地后端已启动。");
+  }
+  try{
+    const t = await (await fetch("/api/tools")).json();
+    $("#tools").innerHTML = "可用工具（行动层）：" +
+      (t.tools || []).map(x => `<code>${x.name}</code>`).join(" · ") +
+      `<br>MCP 通道：<code>${t.transport || "-"}</code>`;
+  }catch(e){ $("#tools").textContent = "工具列表加载失败"; }
+}
+
+// 星云 SDK 的状态名与本页三个展示态对齐（SDK 用 running/speaking/listening 等）
+function mapSdkState(st){
+  const s = String(st || "").toLowerCase();
+  if (s.indexOf("speak") >= 0 || s.indexOf("talk") >= 0) return "Speak";
+  if (s.indexOf("listen") >= 0 || s.indexOf("asr") >= 0) return "Listen";
+  if (s.indexOf("think") >= 0 || s.indexOf("load") >= 0 || s.indexOf("init") >= 0) return "Think";
+  return "Listen";
+}
+
+function loadSdk(url, av){
+  const s = document.createElement("script");
+  s.src = url;
+  s.onerror = () => { $("#face").innerHTML = "星云 SDK 加载失败<br><span style='font-size:11px'>已回退为文字 + 卡片版</span>"; };
+  s.onload = async () => {
+    const Ctor = window.XingyunAvatarAgent || window.XmovAvatar;
+    if (!Ctor){
+      $("#face").innerHTML = "SDK 已加载但未暴露构造器<br><span style='font-size:11px'>已回退为文字 + 卡片版</span>";
+      return;
+    }
+    try{
+      const opts = {
+        containerId: "#avatar-stage",
+        // 关键：不传 appId/appSecret —— 会话由服务端代建，浏览器只拿一次性 e2e 地址 + token
+        // （SDK 规定两者必须成对传入；appSecret 永不出服务器，公网可安全开放）
+        onStateChange(st){
+          const raw = String(st || "").toLowerCase();
+          setState(mapSdkState(st));
+          if (raw.indexOf("reconnect") >= 0){ netBanner(true, "🌐 网络波动：正在自动重连数字人…"); emb("Reconnect", "SDK 进入 reconnecting"); }
+          else if (raw.indexOf("running") >= 0 && document.getElementById("netBanner").style.display === "block"){
+            netBanner(false); emb("Reconnect", "重连成功，回到 running");
+          }
+        },
+        onVoiceStateChange(st){
+          if (st === "start") setState("Speak");
+          else if (st === "end"){
+            setState("Listen");
+            // 全屏语音对话模式：数字人说完自动重新开麦，形成「你说 → 它答 → 你再说」的轮次
+            if (VOICE_LOOP && !MIC.on) setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 500);
+          }
+        },
+        onMessage(err){
+          // SDK 的失败上报口：网关鉴权失败 / 网关不可达 / 字段未识别都从这里出来，
+          // 且 SDK 回调后 return null（既不 reject 也不抛异常）——所以必须在这里变成用户看得见的提示。
+          console.warn("星云 SDK:", err);
+          const code = err && err.code;
+          const reason = xmovReason(code, err && err.message);
+          emb("SDK", "onMessage code=" + (code || "-"));
+          if (XMOV_NET_OK.has(Number(code))){          // 网络恢复：清失败态并重载
+            emb("SDK", "网络恢复信号，清理失败态");
+            AVATAR_DOWN = false;
+            if (AVATAR_FAILED){ AVATAR_FAILED = false; retryAvatar(); }
+            return;
+          }
+          if (XMOV_NET_ERR.has(Number(code)) || !navigator.onLine){
+            // 断网场景由 window 的 offline 监听与自动重连接管，不在此判死
+            netBanner(true, "🌐 检测到网络问题：" + reason + " · 网络恢复后会自动重连");
+            emb("Reconnect", "SDK 报网络类错误：" + code);
+            AVATAR_DOWN = true;                       // 会话按定义没建立，别被成功收尾当已连上
+            if (AV_TTL_TIMER){ clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null; }
+            const bd = $("#modeBadge");
+            if (bd){ bd.textContent = "文字 + 卡片版（网络异常）"; bd.className = "badge text"; }
+            return;
+          }
+          avatarFail("厂商 SDK 上报：" + reason, code);
+        },
+        // 功能开关：ASR 识别结果不自动送平台大脑 —— 交回我方 Agent（RAG + 工具）处理
+        features: { auto_send_asr_to_llm: false, vad_merge_mode: true },
+        // 断线自动重连（SDK 内置：短重试 + 指数退避，随后重新建会话）
+        reconnect: { enabled: true, maxAttempts: 6, initialDelayMs: 500, maxDelayMs: 8000 },
+        agentCallbacks: {
+          onASRResult(r){
+            if (!r || !r.text) return;
+            ASR_TEXT = r.text;
+            // 中间结果实时上屏（isFinal:false 会连续来多条），让「在听」这件事看得见
+            const sub = $("#subtitle");
+            if (sub) sub.textContent = (r.isFinal ? "🎙 听到：" : "🎙 正在听：") + r.text;
+            if (r.isFinal){
+              asrSubmit(r.text);                          // 最终结果 → 走我方问答链路
+            } else {
+              emb("ASR", "识别中：" + r.text);
+              asrArm(1200);                               // 兜底：平台迟迟不给最终结果时也提交
+            }
+          },
+          onAgentStateChange(st){ setState(mapSdkState(st)); },
+          onError(err){
+            console.warn("星云 Agent:", err);
+            try{
+              const dom = (err && err.domain) || "", code = (err && err.code) || "";
+              if (dom === "permission" || /MICROPHONE|ASR/i.test(String(code))){
+                micReset();
+                micBanner(true, "🎤 麦克风/识别异常（" + (code || dom) + "）：请在浏览器里允许麦克风 · <b onclick=\"micRetry()\">点这里重试</b>", true);
+              }
+            }catch(e){}
+          }
+        }
+      };
+      if (av && av.gateway_proxy){
+        // 密钥不出服务器：gatewayServer 指向我们自己的代理，签名在服务端完成。
+        // 这里的 appId/appSecret 是占位值（SDK 要求非空），真实密钥仅存在于服务端 .env。
+        opts.gatewayServer = location.origin + av.gateway_proxy;
+        opts.appId = "via-server-proxy";
+        opts.appSecret = "via-server-proxy";
+        opts.headers = {"X-Demo-Session": SESSION.session_id};
+      } else {
+        bubble("bot", "服务端未开启数字人演示，已用文字 + 卡片版。");
+        return;
+      }
+      // 兜底：SDK 既不给画面也不报错时必须靠超时兜住，否则又回到「点了没反应」
+      clearTimeout(AVATAR_TIMER);
+      AVATAR_TIMER = setTimeout(() => {
+        if (!avatarVisible() && !AVATAR_FAILED && !AVATAR_DOWN)
+          avatarFail("连接超时：8 秒内未建立星云实时会话（多为凭证无效或网关不可达）", 0);
+      }, AVATAR_WAIT_MS);
+      AGENT = new Ctor(opts);
+      if (typeof AGENT.init === "function") await AGENT.init();
+      if (AVATAR_FAILED || AVATAR_DOWN){
+        // init 期间 onMessage 已上报失败/断网（SDK 的失败方式就是「回调 + return null」，
+        // 不是抛异常）。此时若继续走成功收尾，会把刚写上去的提示盖掉，
+        // 页面又变回「点了没反应」—— 必须让位给失败/降级态。
+        emb("AvatarFail", "init 期间已判定失败或断网，跳过成功收尾");
+        return;
+      }
+      clearTimeout(AVATAR_TIMER); AVATAR_TIMER = 0;   // 有画面了，撤掉超时兜底
+      $("#face").style.display = "none";
+      AVATAR_FAILED = false;
+      setAvatarView("landscape");            // 档1：上线即切大画面（16:9），可全屏
+      bubble("bot", "数字人已就绪：表达层=星云实时驱动（厂商），大脑与工具=我方自研。");
+    }catch(e){
+      AGENT = null;
+      bubble("bot", "星云 SDK 初始化失败：" + ((e && e.message) || e) + "（已回退文字 + 卡片版）");
+    }
+  };
+  document.head.appendChild(s);
+}
+
+// 单场限时倒计时 + 离开页面主动释放名额（并发=1，早释放=省钱）
+let AV_TTL_TIMER = null, AV_KEEP_TIMER = null;
+// 心跳：每 20 秒一次，服务端 45 秒收不到就认为掉线并主动释放线路
+function startKeepalive(){
+  if (AV_KEEP_TIMER) clearInterval(AV_KEEP_TIMER);
+  const beat = async () => {
+    if (!(SESSION && SESSION.avatar && SESSION.avatar.enabled)) return;
+    try{
+      const r = await (await fetch("/api/avatar/keepalive", {method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: SESSION.session_id})})).json();
+      if (r && r.ok === false) releaseAvatar("server_released");
+    }catch(e){}
+  };
+  beat();
+  AV_KEEP_TIMER = setInterval(beat, 20000);
+}
+function stopKeepalive(){ if (AV_KEEP_TIMER){ clearInterval(AV_KEEP_TIMER); AV_KEEP_TIMER = null; } }
+function startAvatarCountdown(ttl){
+  let left = ttl;
+  const badge = $("#modeBadge");
+  if (AV_TTL_TIMER) clearInterval(AV_TTL_TIMER);
+  AV_TTL_TIMER = setInterval(() => {
+    left -= 1;
+    badge.textContent = "数字人演示（剩余 " + Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") + "）";
+    if (left <= 0){
+      clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null;
+      releaseAvatar("ttl");
+    }
+  }, 1000);
+}
+
+function releaseAvatar(why){
+  if (!(SESSION && SESSION.avatar && SESSION.avatar.enabled)) return;
+  stopKeepalive();
+  SESSION.avatar.enabled = false;
+  try{
+    navigator.sendBeacon("/api/avatar/release",
+      new Blob([JSON.stringify({session_id: SESSION.session_id})], {type: "application/json"}));
+  }catch(e){}
+  try{ if (AGENT && AGENT.destroy) AGENT.destroy(why || "released"); }catch(e){}
+  AGENT = null;
+  $("#face").style.display = "";
+  $("#avatar").className = "avatar round";   // 回到占位外观
+  $("#face").innerHTML = "本场演示已结束<br><span style='font-size:11px'>文字 + 卡片版照常可用</span>";
+  $("#modeBadge").textContent = "文字 + 卡片版";
+  $("#modeBadge").className = "badge text";
+  bubble("bot", "本场数字人演示已结束（名额已释放）。文字问答 + 卡片交付继续可用。");
+}
+window.addEventListener("beforeunload", () => releaseAvatar("unload"));
+// 兜底：部分场景（后台/切走/页面隐藏）beforeunload 不触发，pagehide 更可靠
+window.addEventListener("pagehide", () => releaseAvatar("pagehide"));
+
+// ---------------------------------------------------------------- 画面区：放大 / 全屏 / 横竖屏
+let AV_ORIENT = "landscape";
+function setAvatarView(orient){
+  const box = $("#avatar");
+  if (!box) return;
+  AV_ORIENT = orient || AV_ORIENT;
+  box.className = "avatar " + AV_ORIENT;
+  const hint = $("#viewHint");
+  if (hint) hint.textContent = "画面区：" + (AV_ORIENT === "landscape" ? "16:9 大屏" : "9:16 竖屏") +
+                               "（可全屏；切换后若画面未自动重排，按 F5 刷新即可）";
+  // SDK 若提供重排接口则调用，保证画布跟随容器变化
+  try{
+    if (AGENT && typeof AGENT.resize === "function") AGENT.resize();
+    else if (AGENT && typeof AGENT.setLayout === "function") AGENT.setLayout({ orientation: AV_ORIENT });
+  }catch(e){}
+}
+function initViewUI(){
+  const full = $("#btnFull"), orient = $("#btnOrient");
+  if (!full || !orient) return;
+  full.onclick = async () => {
+    // 全屏目标 = 整个画面区（含按钮/横幅/字幕/电平表）；只全屏 #avatar 会导致全屏后什么控件都点不到
+    const box = document.querySelector("section.stage") || $("#avatar");
+    try{
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else {
+        await box.requestFullscreen();
+        // 全屏 = 语音对话模式：自动开麦，数字人答完自动回听（轮次对话）
+        VOICE_LOOP = true;
+        emb("VoiceMode", "全屏 → 语音对话模式（自动开启麦克风）");
+        micBanner(true, "🎙 语音对话模式：正在开启麦克风…（若浏览器询问权限请点「允许」）");
+        setTimeout(() => { if (VOICE_LOOP && !MIC.on) toggleMic(); }, 600);
+      }
+      setTimeout(() => { try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){} }, 300);
+    }catch(e){ bubble("bot", "全屏被浏览器拒绝（" + ((e && e.message) || e) + "），可直接放大浏览器窗口。"); }
+  };
+  orient.onclick = () => { setAvatarView(AV_ORIENT === "landscape" ? "portrait" : "landscape"); };
+  document.addEventListener("fullscreenchange", () => {
+    try{ if (AGENT && typeof AGENT.resize === "function") AGENT.resize(); }catch(e){}
+    if (!document.fullscreenElement){
+      // 退出全屏：结束语音对话模式并关麦
+      VOICE_LOOP = false;
+      if (MIC.on){ try{ AGENT && AGENT.stopASR && AGENT.stopASR(); }catch(e){} micReset(); }
+      micBanner(false);
+    }
+  });
+}
+
+// 播报：在线走星云实时驱动，离线回退浏览器语音
+// 具身协同：情绪（表情+语调）与关键动作（手势）随回答内容自动匹配
+function affectOf(d){
+  const txt = (d && d.text) || "";
+  const kinds = ((d && d.widgets) || []).map(w => w.type);
+  if ((d && d.mode) === "killed" || kinds.includes("handoff")) return { emotion: "sad", ka: "Apologize" };
+  if (txt.includes("不达标") || txt.includes("未满足")) return { emotion: "angry", ka: "KeyPoints" };
+  if (kinds.includes("checklist") || kinds.includes("quote")) return { emotion: "happy", ka: "Pointscreen" };
+  if (txt.includes("你好") || txt.includes("欢迎")) return { emotion: "happy", ka: "Hello" };
+  return { emotion: "neutral", ka: "" };
+}
+function buildSsml(text, opts){
+  const safe = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ka = opts && opts.ka
+    ? `<ue4event><type>ka_intent</type><data><ka_intent>${opts.ka}</ka_intent></data></ue4event>` : "";
+  return `<speak>${ka}${safe}</speak>`;
+}
+function splitSentences(text, max){
+  const flat = String(text).split(/\s+/).filter(Boolean).join(" ");
+  const parts = flat.split(/(?<=[。！？；])/).filter(s => s.trim());
+  const out = [];
+  for (const s of parts){
+    if (out.length && (out[out.length - 1] + s).length <= max) out[out.length - 1] += s;
+    else out.push(s);
+  }
+  return out.length ? out : [String(text)];
+}
+// 播报：在线走星云（SSML 分段 + 情绪 + 动作），离线/未开放回退浏览器语音
+async function say(text, opts){
+  if (AGENT && typeof AGENT.speak === "function"){
+    try{
+      const segs = splitSentences(text, 60);
+      for (let i = 0; i < segs.length; i++){
+        const first = i === 0, last = i === segs.length - 1;
+        AGENT.speak(buildSsml(segs[i], opts), first, last,
+                    opts && opts.emotion ? { emotion: opts.emotion } : undefined);
+        emb("Speak", "分段播报 " + (i + 1) + "/" + segs.length + "：" + segs[i].slice(0, 16));
+        if (opts && opts.emotion) emb("Emotion", "情绪 → " + opts.emotion);
+        if (opts && opts.ka) emb("KA", "关键动作 → " + opts.ka);
+      }
+      return;
+    }catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
+  }
+  speak(text);
+}
+
+// 语音输入（ASR）与客户端打断（interrupt）——评审点名要求的容错能力
+let MIC = { on: false }, ASR_TEXT = "", VOICE_LOOP = false, ASR_TIMER = 0, ASR_LAST_SENT = "";
+
+// 语音状态横幅：把「未授权 / 正在聆听 / 已听到」显式摆出来，杜绝"点了没反应"的观感
+function micBanner(show, html, isErr){
+  const el = $("#micBanner"); if (!el) return;
+  el.className = "micbanner" + (isErr ? " err" : "");
+  el.style.display = show ? "block" : "none";
+  if (html != null) el.innerHTML = html;
+}
+function micReset(){
+  MIC.on = false;
+  const b = $("#btnMic"); if (b) b.textContent = "🎤 语音输入";
+  try{ stopMicMeter(); }catch(e){}
+}
+function micRetry(){ micBanner(false); toggleMic(); }
+
+async function toggleMic(){
+  const btn = $("#btnMic");
+  if (!(AGENT && typeof AGENT.startASR === "function")){
+    micBanner(true, "🎤 语音输入需要数字人会话在线（当前是文字 + 卡片版）。", true);
+    bubble("bot", "语音输入需要数字人会话在线（当前是文字 + 卡片版）；麦克风由浏览器直接授权，不会上传到我们服务器以外的第三方。");
+    return;
+  }
+  // 前置检查：没有 E2E 通道时直接说清原因（否则只会抛 SDK 原文「Agent 尚未连接 E2E WebSocket」，看不懂）
+  const e2eOpen = !!(AGENT.e2eClient && AGENT.e2eClient.isOpen);
+  if (!e2eOpen){
+    micBanner(true, "🎤 <b>数字人未连接</b>（星云会话未就绪 / 名额被占 / 后端连不上星云）："
+      + "语音输入需要数字人实时通道 · <b onclick=\"location.reload()\">点这里重连</b>", true);
+    emb("VoiceMode", "E2E 未连接，语音输入不可用（提示重连）");
+    return;
+  }
+  try{
+    if (MIC.on){
+      // 手动结束本轮时，若刚说的话还没提交过，先把它发出去（别浪费这一句）
+      if (ASR_TEXT && ASR_TEXT !== ASR_LAST_SENT){ asrSubmit(ASR_TEXT); return; }
+      await AGENT.stopASR(); micReset(); setState("Listen");
+      micBanner(true, "🎙 已结束本轮聆听。点「🎤 语音输入」或进入全屏继续说话。");
+      emb("Listen", "关闭麦克风");
+    } else {
+      setState("Listen"); emb("Listen", "开启麦克风，进入聆听");
+      micBanner(true, "🎙 正在聆听…说完会自动回答（识别文本先经我方知识库与工具，再回给数字人播报）");
+      ASR_TEXT = ""; ASR_LAST_SENT = "";          // 新一轮，清空上一轮的文本
+      await AGENT.startASR();
+      MIC.on = true; btn.textContent = "⏹ 结束录音";
+      startMicMeter();                    // 电平表：说话时该条必须动，不动就是麦克风没采到
+      bubble("bot", "请说话，说完我会直接回答（识别文本会先经过我方知识库与工具，再回给数字人播报）。");
+    }
+  }catch(e){
+    micReset();
+    const msg = (e && e.message) || String(e || "未知错误");
+    const denied = /denied|permission|not allowed/i.test(msg);
+    micBanner(true, denied
+      ? "🎤 <b>麦克风未授权</b>：请点浏览器地址栏左侧的权限图标 → 把「麦克风」改为允许，然后 <b onclick=\"micRetry()\">点这里重试</b>。"
+      : "🎤 麦克风启动失败（" + msg + "）· <b onclick=\"micRetry()\">点这里重试</b>", true);
+    bubble("bot", "麦克风启动失败（" + msg + "）。请在浏览器里允许麦克风权限后重试。");
+  }
+}
+// 说完一句就关麦（避免数字人自己的声音被再次收进去），播报结束后按需自动重新开麦
+function micAfterFinal(){
+  try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
+}
+// 把识别到的整句提交给问答链路。
+// 注意：这里原来调用的是一个不存在的函数 ask()，导致「识别成功但永远发不出去」——语音提问一直没生效。
+function asrSubmit(text){
+  const t = String(text || ASR_TEXT || "").trim();
+  clearTimeout(ASR_TIMER); ASR_TIMER = 0;
+  if (!t || t === ASR_LAST_SENT) return;
+  ASR_LAST_SENT = t;
+  try{ if (MIC.on && AGENT && typeof AGENT.stopASR === "function"){ AGENT.stopASR(); micReset(); } }catch(e){}
+  micBanner(true, "🎙 已听到：<b>" + t + "</b> —— 正在作答…");
+  emb("ASR", "提交提问：" + t);
+  send(t);
+}
+// 兜底：识别若一直不给最终结果（VAD 不收敛），静默 1.2 秒后也按当前文本提交
+function asrArm(ms){
+  clearTimeout(ASR_TIMER);
+  ASR_TIMER = setTimeout(() => asrSubmit(ASR_TEXT), ms || 1200);
+}
+
+// ---- 麦克风电平表：独立采一路音频做可视化。说话时电平必须动；不动=麦克风没采到声音 ----
+let MIC_METER = { stream: null, ctx: null, raf: 0, analyser: null, data: null };
+async function startMicMeter(){
+  const box = $("#micLevel"), bar = $("#micLevelBar"), hint = $("#micLevelHint");
+  if (!box || MIC_METER.stream) return;
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({audio: true});
+    MIC_METER.stream = s;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    MIC_METER.ctx = new Ctx();
+    const src = MIC_METER.ctx.createMediaStreamSource(s);
+    MIC_METER.analyser = MIC_METER.ctx.createAnalyser();
+    MIC_METER.analyser.fftSize = 512;
+    MIC_METER.data = new Uint8Array(MIC_METER.analyser.fftSize);
+    src.connect(MIC_METER.analyser);
+    box.style.display = "flex";
+    let peak = 0, t0 = Date.now();
+    const tick = () => {
+      if (!MIC_METER.analyser) return;
+      MIC_METER.analyser.getByteTimeDomainData(MIC_METER.data);
+      let sum = 0;
+      for (let i = 0; i < MIC_METER.data.length; i++){ const v = (MIC_METER.data[i] - 128) / 128; sum += v * v; }
+      const rms = Math.sqrt(sum / MIC_METER.data.length);
+      const level = Math.min(100, Math.round(rms * 320));
+      peak = Math.max(peak * 0.94, level);
+      if (bar) bar.style.width = peak + "%";
+      if (hint){
+        if (peak > 4){ hint.textContent = "有声 ✓"; t0 = Date.now(); }
+        else {
+          const secs = Math.round((Date.now() - t0) / 1000);
+          hint.textContent = secs >= 6
+            ? "没采到声音（已 " + secs + " 秒）：请检查系统默认麦克风设备（设置→系统→声音→输入）"
+            : "没采到声音";
+        }
+      }
+      MIC_METER.raf = requestAnimationFrame(tick);
+    };
+    tick();
+    emb("MicLevel", "电平表已启动（说话时该条应随声音变化）");
+  }catch(e){
+    if (box) box.style.display = "flex";
+    if (hint) hint.textContent = "电平表启动失败：" + ((e && e.message) || e);
+  }
+}
+function stopMicMeter(){
+  try{ if (MIC_METER.raf) cancelAnimationFrame(MIC_METER.raf); }catch(e){}
+  try{ if (MIC_METER.stream) MIC_METER.stream.getTracks().forEach(t => t.stop()); }catch(e){}
+  try{ if (MIC_METER.ctx) MIC_METER.ctx.close(); }catch(e){}
+  MIC_METER = { stream: null, ctx: null, raf: 0, analyser: null, data: null };
+  const bar = $("#micLevelBar"), hint = $("#micLevelHint");
+  if (bar) bar.style.width = "0%";
+  if (hint) hint.textContent = "未开启";
+}
+function doInterrupt(){
+  if (AGENT && typeof AGENT.interrupt === "function"){
+    emb("Interrupt", "客户端打断：立即停止播报与动作");
+    const ms = AGENT.interrupt("user_click");
+    setState("Listen");
+    try{ if (typeof AGENT.listen === "function") AGENT.listen(); }catch(e){}
+    bubble("bot", "已打断当前播报（客户端打断耗时 " + ms + " ms），可以继续提问。");
+  } else {
+    try{ speechSynthesis.cancel(); }catch(e){}
+    bubble("bot", "已打断当前语音播报。");
+  }
+}
+
+async function send(text){
+  text = (text || $("#input").value).trim();
+  if (!text) return;
+  // BUSY 时原来直接 return，等于把用户的提问静默吞掉；现在给出可见提示
+  if (BUSY){
+    micBanner(true, "⏳ 上一句还在处理中，请稍候再说（或点「✋ 打断」停止当前播报）", true);
+    emb("Busy", "提交被跳过：上一句仍在处理中");
+    return;
+  }
+  // 已转人工：这一句直接发给坐席（真人工会话），不再走 AI
+  if (HANDOFF && (HANDOFF.status === "active" || HANDOFF.status === "closed")){
+    $("#input").value = "";
+    bubble("me", text);
+    await handoffSay(text);
+    return;
+  }
+  BUSY = true; $("#input").value = ""; $("#send").disabled = true;
+  bubble("me", text);
+  setState("Listen", ["Listen"]);
+  try{
+    await new Promise(r => setTimeout(r, 320));      // 聆听 → 思考（演示节奏）
+    setState("Think", ["Think"]);
+    const r = await fetch("/api/chat", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_id: SESSION ? SESSION.session_id : "anon", text})
+    });
+    const d = await r.json();
+    if (d && d.memory){
+      const pf = d.memory.profile || {};
+      const extra = pf.name ? "（已记住称呼：" + pf.name + "）" : "";
+      const el = document.getElementById("memBadge");
+      if (el) el.textContent = "🧠 记忆 " + (d.memory.turns || 0) + " 轮" + extra;
+      emb("Think", "多轮上下文 " + (d.memory.turns || 0) + " 轮" + (pf.name ? " · 称呼 " + pf.name : ""));
+    }
+    if (!r.ok){ bubble("bot", "出错：" + JSON.stringify(d).slice(0, 200)); setState("Listen"); return; }
+    setState("Speak", d.state && d.state.length ? d.state : ["Speak"]);
+    $("#subtitle").textContent = d.text;
+    bubble("bot", d.text, (d.sources && d.sources.length ? "来源：" + d.sources.join(" / ") : "") +
+                          (d.mode ? (d.sources && d.sources.length ? " · " : "") + "mode=" + d.mode : ""));
+    // 可审计引用：依据原文折叠展示
+    if (d.evidences && d.evidences.length){
+      const det = document.createElement("details");
+      det.className = "evi";
+      const items = d.evidences.map(e => `<pre>【${e.src}】${e.text}</pre>`).join("");
+      det.innerHTML = `<summary>📎 查看依据原文（${d.evidences.length} 条）</summary>${items}`;
+      $("#log").appendChild(det);
+      $("#log").scrollTop = $("#log").scrollHeight;
+    }
+    (d.widgets || []).forEach(card);
+    await say(d.text, affectOf(d));
+    // 离线时用定时器模拟"说完回到聆听"；在线时由 SDK 的 onVoiceStateChange 回调驱动
+    if (!AGENT) setTimeout(() => setState("Listen", ["Listen"]), Math.min(6000, 1200 + d.text.length * 90));
+  }catch(e){
+    bubble("bot", "请求失败：" + e.message);
+  }finally{
+    BUSY = false; $("#send").disabled = false; $("#input").focus();
+  }
+}
+
+$("#send").onclick = () => send();
+$("#input").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+$("#voice").onclick = () => {
+  SPEAK = !SPEAK; $("#voice").style.opacity = SPEAK ? "1" : ".45";
+  $("#voice").title = SPEAK ? "语音播报：开" : "语音播报：关";
+};
+init();
+</script>
+<div id="caption" class="caption"></div>
+<script>
+/* ============================================================================
+   KB-Embodied-Agent · v2 数据层（主题 + 起始画面 + 真实数据面板）
+   ----------------------------------------------------------------------------
+   铁律：面板上的每个数字都必须来自真实接口，取不到就显式写"取不到"。
+        做出来的仪表盘是假的，比页面单调更糟。
+   接口：/api/stats /api/standard /api/tools /api/audit /api/health /api/memory
+   零侵入：不改原 CSS、不改原内联脚本；只往 DOM 里加节点。
+   ============================================================================ */
+(function () {
+  "use strict";
+
+  var TKEY = "kb_v2_theme";
+  var POLL_MS = 3000;
+
+  function $(s) { return document.querySelector(s); }
+  function esc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function mk(tag, cls, html) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function num(v, d) {
+    var n = Number(v);
+    return isFinite(n) ? n : (d == null ? 0 : d);
+  }
+
+  /* ---------------------------------------------------------------- 主题 */
+  var THEMES = [
+    { id: "light", label: "亮色·商务", icon: "☀" },
+    { id: "dark", label: "深色·科技", icon: "🌙" }
+  ];
+  function applyTheme(id) {
+    document.body.setAttribute("data-v2t", id);
+    try { localStorage.setItem(TKEY, id); } catch (e) {}
+    var b = $("#v2theme");
+    if (b) {
+      var t = THEMES.filter(function (x) { return x.id === id; })[0] || THEMES[0];
+      var nx = THEMES.filter(function (x) { return x.id !== id; })[0];
+      b.innerHTML = '<span aria-hidden="true">' + t.icon + "</span>切换为" + nx.label;
+      b.title = "当前：" + t.label + "；点击切到" + nx.label;
+    }
+  }
+  var saved = "light";
+  try { saved = localStorage.getItem(TKEY) || "light"; } catch (e) {}
+  if (saved !== "dark") saved = "light";
+  applyTheme(saved);
+
+  /* ------------------------------------------------------- 审计语义分组 */
+  var KIND_CN = {
+    "chat": "对话", "triage": "意图分流", "rag-semantic-pick": "知识检索",
+    "selfcheck": "国标体检", "kb-audit": "知识库体检",
+    "handoff-ticket": "转人工", "handoff-claim": "坐席接单", "handoff-msg": "坐席消息",
+    "handoff-release": "坐席释放", "handoff-close": "工单关闭", "clear-tickets": "清理工单",
+    "kill-switch": "一键停",
+    "avatar-open": "数字人开启", "avatar-release": "数字人释放", "avatar-denied": "数字人被拒",
+    "avatar-stop": "数字人停止", "avatar-switch": "数字人开关",
+    "redteam-case": "红队用例", "redteam-run-all": "红队全量", "redteam-report": "红队报告",
+    "xmov-proxy": "星云通道", "xmov-proxy-error": "星云通道异常", "xmov-proxy-denied": "星云通道拒绝",
+    "xmov-session-bound": "星云会话绑定", "xmov-session-probe": "星云会话探测"
+  };
+  var KIND_GROUP = {
+    "chat": "对话", "triage": "对话", "rag-semantic-pick": "对话",
+    "handoff-ticket": "转人工", "handoff-claim": "转人工", "handoff-msg": "转人工",
+    "handoff-release": "转人工", "handoff-close": "转人工", "clear-tickets": "转人工",
+    "kill-switch": "停用",
+    "avatar-open": "数字人", "avatar-release": "数字人", "avatar-stop": "数字人",
+    "avatar-switch": "数字人", "xmov-proxy": "数字人", "xmov-session-bound": "数字人",
+    "xmov-session-probe": "数字人",
+    "avatar-denied": "合规拦截", "redteam-case": "合规拦截", "redteam-run-all": "合规拦截",
+    "redteam-report": "合规拦截", "xmov-proxy-denied": "合规拦截", "xmov-proxy-error": "合规拦截",
+    "selfcheck": "工具", "kb-audit": "工具"
+  };
+  function kindCN(k) { return KIND_CN[k] || (k || "事件"); }
+  function kindGroup(k) { return KIND_GROUP[k] || "对话"; }
+
+  /* ------------------------------------------------------------ 顶部状态条 */
+  function buildBar() {
+    var h = $("header");
+    if (!h || $("#v2bar")) return;
+    var bar = mk("div", "", "");
+    bar.id = "v2bar";
+    bar.appendChild(mk("span", "v2pill", '<span class="v2dot" id="v2dotAv"></span>数字人 <b id="v2pAv">—</b>'));
+    bar.appendChild(mk("span", "v2pill", '<span class="v2dot ok"></span>并发 <b id="v2pCc">—</b>'));
+    bar.appendChild(mk("span", "v2pill", "记忆 <b id=\"v2pMem\">—</b>"));
+    bar.appendChild(mk("span", "v2pill", '运行模式 <b id="v2pMode">—</b>'));
+
+    var board = mk("button", "v2pill", "📋 能力看板");
+    board.id = "v2board";
+    board.type = "button";
+    board.style.cursor = "pointer";
+    board.onclick = openModal;
+    bar.appendChild(board);
+
+    var th = mk("button", "", "");
+    th.id = "v2theme";
+    th.type = "button";
+    th.onclick = function () {
+      applyTheme(document.body.getAttribute("data-v2t") === "light" ? "dark" : "light");
+    };
+    bar.appendChild(th);
+
+    h.appendChild(bar);
+    // 必须等按钮进了 DOM 再刷新文案，否则取不到节点
+    applyTheme(document.body.getAttribute("data-v2t"));
+  }
+
+  /* -------------------------------------------------------------- 左栏骨架 */
+  function buildLeft() {
+    var m = $("main");
+    if (!m || $("#v2left")) return;
+    var a = mk("aside", "v2rail", "");
+    a.id = "v2left";
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>实时运行<span class="vhint" id="v2kpiAt">—</span></h3>' +
+      '<div class="v2kpis">' +
+      '  <div class="v2kpi"><div class="k">今日会话</div><div class="v" id="v2kSess">—</div><div class="d" id="v2kSessD">—</div></div>' +
+      '  <div class="v2kpi"><div class="k">今日积分</div><div class="v" id="v2kPts">—</div><div class="d" id="v2kPtsD">—</div></div>' +
+      '  <div class="v2kpi"><div class="k">并发占用</div><div class="v" id="v2kCc">—</div><div class="d" id="v2kCcD">—</div></div>' +
+      '  <div class="v2kpi"><div class="k">会话单场时长</div><div class="v" id="v2kTtl">—</div><div class="d" id="v2kTtlD">—</div></div>' +
+      "</div>"));
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>配额占用<span class="vhint">达 80% 转黄 · 95% 转红</span></h3>' +
+      '<div class="v2bars" id="v2Bars"><div class="v2empty">读取中…</div></div>'));
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>国标能力总览<span class="vhint" id="v2StdHint">GB/T 47746</span></h3>' +
+      '<div class="v2ring">' +
+      '  <svg width="104" height="104" viewBox="0 0 100 100" aria-hidden="true">' +
+      '    <circle cx="50" cy="50" r="40" fill="none" stroke="var(--v2-track-bg)" stroke-width="11"></circle>' +
+      '    <circle id="v2RingA" cx="50" cy="50" r="40" fill="none" stroke="#1a4eda" stroke-width="11" stroke-linecap="butt" transform="rotate(-90 50 50)"></circle>' +
+      '    <circle id="v2RingB" cx="50" cy="50" r="40" fill="none" stroke="#b7791f" stroke-width="11" stroke-linecap="butt" transform="rotate(-90 50 50)"></circle>' +
+      '    <circle id="v2RingC" cx="50" cy="50" r="40" fill="none" stroke="#9aa5b4" stroke-width="11" stroke-linecap="butt" transform="rotate(-90 50 50)"></circle>' +
+      '    <text id="v2RingN" x="50" y="47" text-anchor="middle" font-size="21" font-weight="700" fill="var(--fg)">—</text>' +
+      '    <text id="v2RingL" x="50" y="62" text-anchor="middle" font-size="10" fill="var(--dim)">条款</text>' +
+      "  </svg>" +
+      '  <div class="rc"><div class="rh" id="v2StdName">—<b id="v2StdDates">—</b></div>' +
+      '  <div class="v2legend" id="v2StdLegend"></div></div>' +
+      "</div>"));
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>可用工具<span class="vhint" id="v2ToolTx">—</span></h3>' +
+      '<div class="v2chips" id="v2Chips"><span class="v2empty">读取中…</span></div>'));
+
+    m.insertBefore(a, m.firstChild);
+  }
+
+  /* -------------------------------------------------------------- 右栏骨架 */
+  function buildRight() {
+    var m = $("main");
+    if (!m || $("#v2right")) return;
+    var a = mk("aside", "v2rail", "");
+    a.id = "v2right";
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>后端连通性<span class="vhint" id="v2HealthAt">—</span></h3>' +
+      '<div class="v2legend" id="v2Health"><div class="v2empty">读取中…</div></div>'));
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>实时审计流水<span class="vhint" id="v2AuditN">—</span></h3>' +
+      '<div class="v2stream" id="v2Stream"><div class="v2empty">暂无事件 · 发一句话就有了</div></div>'));
+
+    a.appendChild(mk("section", "v2card",
+      '<h3>运行明细<span class="vhint">真实参数</span></h3>' +
+      '<div class="v2legend" id="v2Detail"><div class="v2empty">读取中…</div></div>'));
+
+    m.appendChild(a);
+  }
+
+  /* ------------------- 语音交互：默认开启 + 入口凸显 + 随时可关 + 手势开麦
+     为什么不能"一进页面就开麦"：浏览器硬性要求麦克风必须由用户手势开启，
+     自动调 startASR 会被直接拒绝。所以"默认开启"实现为：
+     ① SPEAK/VOICE_LOOP 默认为真（播报 + 答完自动回听）；
+     ② 页面入口显示"已开启"；
+     ③ 用户在页面上第一次点击/触摸时自动进入聆听（这一次点击就是那个手势）。
+     ------------------------------------------------------------------- */
+  var VKEY = "kb_v2_voice";
+  var VOICE_ON = true;      // 默认开启
+  var ARMED = false;        // 是否已借某次手势把麦克风打开过
+  try { if (localStorage.getItem(VKEY) === "0") VOICE_ON = false; } catch (e) {}
+
+  function micOn() {
+    try { return !!(typeof MIC !== "undefined" && MIC && MIC.on); } catch (e) { return false; }
+  }
+  // 比"AGENT 存在"更严：还要实时通道真的开着，否则点了只会弹"数字人未连接"
+  function agentReady() {
+    try {
+      if (!(typeof AGENT !== "undefined" && AGENT && typeof AGENT.startASR === "function")) return false;
+      var c = AGENT.e2eClient;
+      if (c && c.isOpen === false) return false;
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function buildVoice() {
+    var st = document.querySelector("main > section.stage");
+    if (!st || document.getElementById("v2voice")) return;
+    var box = mk("div", "", "");
+    box.id = "v2voice";
+    box.innerHTML =
+      '<button id="v2vBtn" type="button">' +
+      '<span id="v2vMic">🎙</span>' +
+      '<span id="v2vT">' +
+      '<span class="t" id="v2vT1">语音对话</span>' +
+      '<span class="s"><span id="v2vT2">正在读取状态…</span><span id="v2vPerm"></span></span></span>' +
+      "</button>" +
+      '<span id="v2vhint" role="button" tabindex="0">👇 点这里就能说话</span>' +
+      '<button id="v2vSw" type="button">关闭语音</button>';
+    st.insertBefore(box, st.firstChild);
+
+    document.getElementById("v2vBtn").onclick = function () {
+      if (!VOICE_ON) { setVoice(true); return; }
+      speakGuide();                      // 借这次点击把语音引导放出来（浏览器只认手势）
+      if (!agentReady()) {
+        // 明确点它却不具备条件时，绝不静默：交给原脚本把真实原因（未上线/通道未通）说出来
+        try { toggleMic(); } catch (e) {}
+        return;
+      }
+      armMic(true);
+    };
+    // 引导气泡本身就是个 CTA：点它 = 重播语音引导（数字人声音）+ 开麦
+    var hint = document.getElementById("v2vhint");
+    hint.onclick = function () {
+      speakGuide(true);                  // 强制重播：万一首次被浏览器拦了，点一下就补上
+      if (VOICE_ON) armMic(true);
+      else setVoice(true);
+    };
+
+    document.getElementById("v2vSw").onclick = function () { setVoice(!VOICE_ON); };
+
+    setVoice(VOICE_ON, true);
+    voiceTick();
+    setInterval(voiceTick, 700);
+
+    // 开页就申请麦克风权限（拿到即释放，权限留在浏览器，后面识别不再弹框）
+    primeMic();
+    // 开页先尝试放一次语音引导；被浏览器拦住时状态会标成 blocked，改用"点一下播放"
+    speakGuide();
+    if (ttsOK() && !speechSynthesis.getVoices().length) {
+      // 语音列表是异步来的，第一次调时常为空，等它到位再试一次
+      try {
+        speechSynthesis.addEventListener("voiceschanged", function () {
+          if (GUIDE_STATE === "idle" || GUIDE_STATE === "trying") speakGuide();
+        });
+      } catch (e) {}
+    }
+
+    // 首次手势自动进入聆听；避开会把麦克风自己管起来的按钮与输入框
+    ["click", "touchstart"].forEach(function (ev) {
+      document.addEventListener(ev, function (e) {
+        var t = e.target;
+        USER_ACTED = true;
+        if (!t || !t.closest) return;
+        if (!document.getElementById("v2voice") && !speechSynthesis) return;
+        if (GUIDE_STATE === "idle" || GUIDE_STATE === "blocked") speakGuide();  // 引导优先跟着第一次点击走
+        if (t.closest("#v2voice, #btnMic")) return;      // 这两个按钮自己管麦克风，别抢
+        if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return;
+        if (VOICE_ON) armMic(false);
+      }, true);
+    });
+  }
+
+  /* ------------------ 语音引导（优先用魔珐数字人的声音） --------------------------
+     通道优先级：① 数字人语音 say()（星云 SSML + 情绪 + Hello 动作）——正式演示用这条；
+                ② 浏览器合成音 speechSynthesis —— 仅在数字人不可用时兜底，
+                   音色偏机械，正式场合不该听到它。
+     实测：Chrome 对无手势的 speechSynthesis.speak() 回 error="not-allowed"，
+     故开页先试一次，被拦就标 blocked，第一次点击时补上。
+     ------------------------------------------------------------------------- */
+  /* 开场白 = 三段：①自我介绍 ②能咨询什么 ③语音怎么用
+     由 say() 按句号切成分段 SSML 播报，段间天然有停顿，不会一口气念完。
+     口径纪律：只讲可核验的能力（查知识库/出卡片/转人工），不写覆盖率、准确率一类的承诺。 */
+  var GUIDE = "您好，欢迎体验企业知识库智能客服。我是这里的数字员工，可以回答企业知识库里的问题，" +
+              "也能现场生成合规自查清单和报价单，需要真人时随时帮您转接。" +
+              "您点一下上方的语音对话按钮，再直接说话就行，说完我会自动作答，答完还会继续听您说。";
+  var GUIDE_STATE = "idle";     // idle | trying | spoken | blocked | off | unsupported
+  var GUIDE_CH = "";            // avatar | browser —— 这次引导实际用的哪条通道
+  var MIC_PERM = "unknown";     // unknown | granted | denied | error | unsupported
+  var USER_ACTED = false;       // 是否已发生过真实用户手势（决定音频能不能放）
+  var HINT_DONE = false;
+  try { HINT_DONE = sessionStorage.getItem("kb_v2_hint") === "0"; } catch (e) {}
+
+  function ttsOK() { return !!(window.speechSynthesis && window.SpeechSynthesisUtterance); }
+  function convStarted() { try { return !!document.querySelector("#log .msg.me"); } catch (e) { return false; } }
+  // 数字人语音通道是否就绪（要求真的有 speak 且实时通道已开）
+  function avatarVoiceReady() {
+    try {
+      if (!(typeof AGENT !== "undefined" && AGENT && typeof AGENT.speak === "function")) return false;
+      var c = AGENT.e2eClient;
+      if (c && c.isOpen === false) return false;
+      return true;
+    } catch (e) { return false; }
+  }
+  // 数字人是否"肯定来不了"（离线模式 / 已明确失败）。只有这种情况才允许退回机械音。
+  function avatarUnavailable() {
+    try { if (typeof AVATAR_FAILED !== "undefined" && AVATAR_FAILED) return true; } catch (e) {}
+    if (CACHE.stats && CACHE.stats.demo_mode === "offline") return true;
+    try {
+      var S = (typeof SESSION !== "undefined") ? SESSION : null;
+      if (S && S.mode && S.mode !== "online") return true;
+    } catch (e) {}
+    return false;
+  }
+
+  /* 开场白同步落到屏幕上：
+     ① #subtitle（数字人下方那行"正在说什么"）—— 音频被浏览器拦时，客户至少读得到；
+     ② 对话记录里留一条 —— 开场介绍进日志，后面回看也在。
+     只在第一次开场时落，点"重播"不会重复刷屏。 */
+  var GUIDE_BUBBLED = false;
+  function greetOnScreen() {
+    if (GUIDE_BUBBLED) return;
+    GUIDE_BUBBLED = true;
+    try { var sub = document.getElementById("subtitle"); if (sub) sub.textContent = GUIDE; } catch (e) {}
+    try { if (typeof bubble === "function") bubble("bot", GUIDE, "开场介绍 · 数字员工"); } catch (e) {}
+  }
+
+  function speakGuide(force) {
+    if (!VOICE_ON) { GUIDE_STATE = "off"; return; }
+    if (!force && GUIDE_STATE === "spoken") return;
+    if (!force && convStarted()) { GUIDE_STATE = "spoken"; return; }   // 已在对话，别插嘴
+
+    // ① 首选：数字人自己的声音（星云 SSML 分段 + 情绪 + Hello 动作）
+    if (avatarVoiceReady()) {
+      try {
+        say(GUIDE, { emotion: "happy", ka: "Hello" });
+        GUIDE_STATE = "spoken"; GUIDE_CH = "avatar";
+        greetOnScreen();
+        try { emb("Speak", "开场介绍（数字人声音）"); } catch (e) {}
+        return;
+      } catch (e) {}
+    }
+
+    // ①.5 数字人还没就绪、但也还没判死 → 等它。绝不用机械音先糊弄一遍。
+    if (!avatarUnavailable()) { GUIDE_STATE = "waiting"; return; }
+
+    // ② 兜底：浏览器合成音。音色偏机械，只在数字人确定不可用时才用。
+    if (!ttsOK()) { GUIDE_STATE = "unsupported"; return; }
+    try {
+      GUIDE_STATE = "trying";
+      var u = new SpeechSynthesisUtterance(GUIDE);
+      u.lang = "zh-CN"; u.rate = 1.0;
+      var vs = speechSynthesis.getVoices() || [];
+      for (var i = 0; i < vs.length; i++) {
+        if (/zh|Chinese/i.test(vs[i].lang + " " + vs[i].name)) { u.voice = vs[i]; break; }
+      }
+      u.onstart = function () { GUIDE_STATE = "spoken"; GUIDE_CH = "browser"; greetOnScreen(); };
+      u.onerror = function (e) {
+        var er = (e && e.error) || "error";
+        GUIDE_STATE = (er === "not-allowed") ? "blocked" : ("error:" + er);
+      };
+      speechSynthesis.speak(u);
+    } catch (e) { GUIDE_STATE = "error"; }
+  }
+
+  function primeMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { MIC_PERM = "unsupported"; return; }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      try { s.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}   // 拿到即释放，不留占用
+      MIC_PERM = "granted";
+      voiceTick();
+    }).catch(function (e) {
+      MIC_PERM = (e && e.name === "NotAllowedError") ? "denied" : "error";
+      voiceTick();
+    });
+  }
+
+  function setVoice(on, silent) {
+    VOICE_ON = !!on;
+    try { localStorage.setItem(VKEY, on ? "1" : "0"); } catch (e) {}
+    // 与原脚本的语音状态对齐：VOICE_LOOP=答完自动回听；SPEAK=自动播报
+    try { if (typeof VOICE_LOOP !== "undefined") VOICE_LOOP = !!on; } catch (e) {}
+    try { if (typeof SPEAK !== "undefined") SPEAK = !!on; } catch (e) {}
+    if (!on) {
+      ARMED = false;
+      if (micOn()) { try { toggleMic(); } catch (e) {} }   // 关掉时若正在听，先把麦关了
+    }
+    voiceTick();
+    if (!silent) { try { emb("VoiceMode", on ? "用户开启语音对话" : "用户关闭语音对话"); } catch (e) {} }
+  }
+
+  function armMic(force) {
+    if (!VOICE_ON || !agentReady() || micOn()) return;
+    if (ARMED && !force) return;
+    ARMED = true;
+    try { toggleMic(); } catch (e) {}
+  }
+
+  function voiceTick() {
+    var box = document.getElementById("v2voice");
+    if (!box) return;
+    var t1 = document.getElementById("v2vT1"), t2 = document.getElementById("v2vT2");
+    var sw = document.getElementById("v2vSw"), mic = document.getElementById("v2vMic");
+    var hint = document.getElementById("v2vhint");
+    var ready = agentReady(), on = micOn();
+
+    if (VOICE_ON && typeof VOICE_LOOP !== "undefined" && !VOICE_LOOP) {
+      try { VOICE_LOOP = true; } catch (e) {}      // 开启状态下保证轮次对话不回断
+    }
+    box.className = !VOICE_ON ? "off" : (ready ? "on" : "wait");
+    if (mic) mic.className = on ? "listening" : "";
+    var bm = document.getElementById("btnMic");
+    if (bm) { if (on) bm.classList.add("mic-on"); else bm.classList.remove("mic-on"); }
+
+    // 真的开始听过一轮之后，就把引导气泡收掉（别一直晃）
+    if (on && !HINT_DONE) {
+      HINT_DONE = true;
+      try { sessionStorage.setItem("kb_v2_hint", "0"); } catch (e) {}
+    }
+    if (hint) {
+      var showHint = VOICE_ON && !HINT_DONE && !on;
+      hint.style.display = showHint ? "" : "none";
+      hint.textContent = (GUIDE_STATE === "blocked") ? "👇 点这里：听引导 + 说话" : "👇 点这里就能说话";
+      // 还没用过之前，整条入口持续发光，进一步把它从整页里"拎"出来
+      if (showHint) box.classList.add("spot"); else box.classList.remove("spot");
+    }
+
+    // 数字人声音一就绪就开口引导 —— "打开页面就有语音提示"在浏览器策略下的最佳落点
+    if (VOICE_ON && GUIDE_STATE !== "spoken" && !convStarted() && avatarVoiceReady()) {
+      speakGuide();
+    }
+
+    // 麦克风权限预热的结果必须看得见，否则"授权失败"会伪装成"按钮没用"
+    var pc = document.getElementById("v2vPerm");
+    if (pc) {
+      var pm = {
+        granted:         ["麦克风已授权", "ok",   "开页时已申请并通过，识别时不会再弹框"],
+        denied:          ["麦克风未授权", "bad",  "点地址栏的锁图标 → 允许麦克风 → 刷新页面"],
+        error:           ["麦克风异常",   "warn", "未检测到可用麦克风设备，请检查系统设置"],
+        unsupported:     ["不支持麦克风", "warn", "当前浏览器不支持网页录音，建议用 Chrome"],
+        unknown:         ["正在申请麦克风…", "", "浏览器会弹出授权提示，请点「允许」"]
+      }[MIC_PERM] || null;
+      if (pm) {
+        pc.textContent = pm[0];
+        pc.className = "perm " + (pm[1] || "");
+        pc.title = pm[2];
+      } else { pc.textContent = ""; pc.className = ""; }
+    }
+
+    if (!VOICE_ON) {
+      t1.textContent = "语音对话 · 已关闭";
+      t2.textContent = "只做文字问答，不播报也不开麦";
+      sw.textContent = "开启语音";
+    } else if (on) {
+      t1.textContent = "我正在听，请说话";
+      t2.textContent = "说完自动提交 · 答完自动回听";
+      sw.textContent = "关闭语音";
+    } else if (ready) {
+      t1.textContent = "语音对话 · 已开启";
+      t2.textContent = "点这里或页面任意处开始说话";
+      sw.textContent = "关闭语音";
+    } else {
+      t1.textContent = "语音对话 · 待命中";
+      t2.textContent = (CACHE.stats && CACHE.stats.demo_mode === "offline")
+        ? "当前为文字模式；语音需数字人在线"
+        : "数字人就绪后自动开启";
+      sw.textContent = "关闭语音";
+    }
+  }
+
+  /* ------------------------------------------------------------ 能力看板弹层 */
+  function buildModal() {
+    if ($("#v2modal")) return;
+    var d = mk("div", "", "");
+    d.id = "v2modal";
+    d.innerHTML =
+      '<div class="box">' +
+      '  <div class="mh"><h2>📋 能力看板</h2>' +
+      '    <span class="vhint" style="color:var(--dim);font-size:12px">数据全部取自本站实时接口</span>' +
+      '    <button class="x" type="button" id="v2modalX">关闭</button></div>' +
+      '  <div class="mb">' +
+      '    <section class="v2card"><h3>国标条款分布（GB/T 47746—2026）</h3><div id="v2MbSec"><div class="v2empty">读取中…</div></div></section>' +
+      '    <section class="v2card"><h3>强制分级与否决项</h3><div id="v2MbLv"><div class="v2empty">读取中…</div></div></section>' +
+      '    <section class="v2card mfull"><h3>行动层：可用工具</h3><div id="v2MbTools"><div class="v2empty">读取中…</div></div></section>' +
+      '    <section class="v2card mfull"><h3>最近审计流水</h3><div id="v2MbAudit"><div class="v2empty">读取中…</div></div></section>' +
+      "  </div>" +
+      "</div>";
+    document.body.appendChild(d);
+    d.onclick = function (e) { if (e.target === d) closeModal(); };
+    var x = $("#v2modalX");
+    if (x) x.onclick = closeModal;
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeModal();
+    });
+  }
+  function openModal() { var d = $("#v2modal"); if (d) d.classList.add("on"); }
+  function closeModal() { var d = $("#v2modal"); if (d) d.classList.remove("on"); }
+
+  /* --------------------------------------------------- 数字人起始画面（poster） */
+  function buildPoster() {
+    var av = $("#avatar");
+    if (!av || $("#v2poster")) return;
+    var p = mk("div", "", "");
+    p.id = "v2poster";
+    p.innerHTML =
+      '<div class="halo"><span class="fig"><i class="h"></i><i class="b"></i></span></div>' +
+      '<div class="cap"><div class="b1" id="v2p1">数字人画面</div><div class="b2" id="v2p2">正在读取本站运行状态…</div></div>' +
+      '<div class="pw" id="v2p3"><span>正在建立会话</span><span class="track"><i></i></span></div>' +
+      '<div class="tags" id="v2p4"></div>';
+    av.insertBefore(p, av.firstChild);
+    posterTick();
+    setInterval(posterTick, 700);
+    try {
+      var f = $("#face");
+      if (f && window.MutationObserver) {
+        new MutationObserver(posterTick).observe(f, {
+          attributes: true, attributeFilter: ["style"], childList: true, subtree: true
+        });
+      }
+    } catch (e) {}
+  }
+
+  function posterTick() {
+    var p = $("#v2poster"), f = $("#face");
+    if (!p) return;
+    var faceHidden = !f || f.style.display === "none";
+    var failed = false, online = false, mode = "";
+    try { failed = (typeof AVATAR_FAILED !== "undefined") ? !!AVATAR_FAILED : false; } catch (e) {}
+    try {
+      var S = (typeof SESSION !== "undefined") ? SESSION : null;
+      if (S) { mode = S.mode || ""; online = (mode === "online" && !!(S.avatar && S.avatar.enabled)); }
+    } catch (e) {}
+    if (!mode && CACHE.stats) mode = CACHE.stats.demo_mode === "offline" ? "offline" : "";
+
+    // 数字人画面已出现 / 已明确失败（失败原因要让人看清，不挡）→ 收起起始画面
+    if (faceHidden || failed) { p.classList.add("off"); return; }
+    p.classList.remove("off");
+
+    var b1 = $("#v2p1"), b2 = $("#v2p2"), pw = $("#v2p3"), tg = $("#v2p4");
+    if (online) {
+      p.classList.remove("static");
+      b1.textContent = "正在建立数字人会话…";
+      b2.textContent = "会话由服务端代建，浏览器只持一次性凭证；画面就绪后自动切换，无需操作。";
+      if (pw) pw.style.display = "";
+      if (tg) tg.innerHTML = "<span>实时驱动</span><span>语音 + 口型</span><span>国标合规</span>";
+    } else {
+      p.classList.add("static");
+      b1.textContent = "数字人画面区";
+      b2.textContent = (mode === "offline")
+        ? "当前为离线演示：文字问答 + 卡片交付照常可用，不消耗数字人额度。"
+        : "当前未接入实时数字人驱动，文字问答 + 卡片交付照常可用。";
+      if (pw) pw.style.display = "none";
+      if (tg) tg.innerHTML = "<span>文字问答</span><span>卡片交付</span><span>审计留痕</span>";
+    }
+  }
+
+  /* ------------------------------------------------------------------ 取数 */
+  var CACHE = { stats: null, standard: null, tools: null, audit: null, health: null, mem: null };
+  function getJSON(u) {
+    return fetch(u, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+  }
+
+  function pull() {
+    getJSON("/api/stats").then(function (j) { CACHE.stats = j; renderStats(j); }).catch(function () {});
+    getJSON("/api/health").then(function (j) { CACHE.health = j; renderHealth(j); }).catch(function () {});
+    getJSON("/api/standard").then(function (j) { CACHE.standard = j; renderStandard(j); }).catch(function () {});
+    getJSON("/api/tools").then(function (j) { CACHE.tools = j; renderTools(j); }).catch(function () {});
+    getJSON("/api/audit?limit=24").then(function (j) { CACHE.audit = j; renderAudit(j); }).catch(function () {});
+    // 记忆轮次：/api/memory 必须带 session_id（不带会 422）
+    var sid = "";
+    try { if (typeof SESSION !== "undefined" && SESSION && SESSION.session_id) sid = SESSION.session_id; } catch (e) {}
+    var mem = $("#v2pMem");
+    if (sid) {
+      getJSON("/api/memory?session_id=" + encodeURIComponent(sid)).then(function (j) {
+        CACHE.mem = j;
+        if (mem) {
+          mem.textContent = num(j && j.turns, 0) + " 轮";
+          mem.title = "本会话已记忆 " + num(j && j.turns, 0) + " 轮对话（session " + sid + "）";
+        }
+      }).catch(function () {});
+    } else if (mem) {
+      mem.textContent = "待会话";
+      mem.title = "会话建立后显示本场记忆轮次";
+    }
+  }
+
+  /* ------------------------------------------------------------------ 渲染 */
+  function renderStats(j) {
+    if (!j) return;
+    var eff = !!j.avatar_enabled_effective;
+    var d = $("#v2dotAv"), a = $("#v2pAv");
+    if (d) d.className = "v2dot " + (eff ? "ok live" : "warn");
+    if (a) a.textContent = eff ? "在线" : (j.demo_mode === "offline" ? "离线演示" : "未接入");
+    var pm = $("#v2pMode");
+    if (pm) pm.textContent = ({ offline: "离线演示", text: "文字模式", online: "在线演示" })[j.demo_mode] || (j.demo_mode || "—");
+    var pc = $("#v2pCc");
+    if (pc) pc.textContent = num(j.busy_now) + " / " + num(j.concurrency);
+
+    var at = $("#v2kpiAt");
+    if (at) at.textContent = nowHM();
+
+    kpi("#v2kSess", "#v2kSessD", num(j.day_sessions) + " / " + num(j.day_session_cap), "当日会话总数 / 上限");
+    kpi("#v2kPts", "#v2kPtsD", num(j.day_points).toFixed(1) + " / " + num(j.day_points_cap), "数字人积分消耗 / 上限");
+    kpi("#v2kCc", "#v2kCcD", num(j.busy_now) + " / " + num(j.concurrency), j.slot_busy ? "当前时段已被占用" : "当前有空闲名额");
+    kpi("#v2kTtl", "#v2kTtlD", Math.round(num(j.avatar_ttl) / 60) + " 分钟", "单场数字人演示时长上限");
+
+    var bars = [
+      ["会话额度", num(j.day_sessions), num(j.day_session_cap), ""],
+      ["积分额度", num(j.day_points), num(j.day_points_cap), " 分"],
+      ["并发名额", num(j.busy_now), num(j.concurrency), ""]
+    ];
+    var box = $("#v2Bars");
+    if (box) {
+      box.innerHTML = bars.map(function (b) {
+        var pct = b[2] ? Math.min(100, (b[1] / b[2]) * 100) : 0;
+        var cls = pct >= 95 ? "bad" : (pct >= 80 ? "warn" : "");
+        return '<div class="v2bar-row"><div class="lb"><span>' + esc(b[0]) + "</span>" +
+          "<b>" + b[1] + (b[2] ? " / " + b[2] : "") + esc(b[3]) + "（" + pct.toFixed(0) + "%）</b></div>" +
+          '<div class="v2track ' + cls + '"><i style="width:' + pct.toFixed(1) + '%"></i></div></div>';
+      }).join("");
+    }
+
+    var det = $("#v2Detail");
+    if (det) {
+      var rows = [
+        ["演示模式", ({ offline: "离线演示", text: "文字模式", online: "在线演示" })[j.demo_mode] || (j.demo_mode || "—"), "ok"],
+        ["数字人总开关", j.avatar_enabled ? "已允许" : "已关闭", j.avatar_enabled ? "ok" : "warn"],
+        ["本次生效", eff ? "已生效" : "未生效", eff ? "ok" : "warn"],
+        ["名额占用", j.slot_busy ? "占用中" : "空闲", j.slot_busy ? "warn" : "ok"],
+        ["积分单价", num(j.points_per_min).toFixed(2) + " 分/分钟", "ok"]
+      ];
+      det.innerHTML = rows.map(function (r) {
+        return "<div><i style=\"background:var(--v2-" + (r[2] === "ok" ? "ok" : "warn") + ")\"></i>" +
+          esc(r[0]) + "<b>" + esc(r[1]) + "</b></div>";
+      }).join("") +
+        '<div style="display:block;font-size:11px;color:var(--dim);margin-top:4px;line-height:1.5">开关说明：' +
+        esc(j.avatar_reason || "—") + "</div>";
+    }
+  }
+  function kpi(vs, ds, v, d) {
+    var e = $(vs); if (e) e.textContent = v;
+    var f = $(ds); if (f) f.textContent = d;
+  }
+
+  function renderHealth(j) {
+    if (!j) return;
+    var box = $("#v2Health");
+    var at = $("#v2HealthAt");
+    if (at) at.textContent = nowHM();
+    if (!box) return;
+    var rows = [
+      ["服务健康", j.ok ? "正常" : "异常", j.ok ? "ok" : "warn"],
+      ["大模型接入", j.llm_configured ? "已配置" : "未配置", j.llm_configured ? "ok" : "warn"],
+      ["数字人凭证", j.xmov_configured ? "已配置" : "未配置", j.xmov_configured ? "ok" : "warn"],
+      ["知识库路径", String(j.kb_path || "—"), "ok"],
+      ["运行模式", ({ offline: "离线演示", text: "文字模式", online: "在线演示" })[j.demo_mode] || (j.demo_mode || "—"), "ok"]
+    ];
+    box.innerHTML = rows.map(function (r) {
+      return "<div><i style=\"background:var(--v2-" + (r[2] === "ok" ? "ok" : "warn") + ")\"></i>" +
+        esc(r[0]) + "<b>" + esc(r[1]) + "</b></div>";
+    }).join("") +
+      (j.llm_hint ? '<div style="display:block;font-size:11px;color:var(--warn);margin-top:4px">' + esc(j.llm_hint) + "</div>" : "") +
+      (j.xmov_hint ? '<div style="display:block;font-size:11px;color:var(--warn);margin-top:2px">' + esc(j.xmov_hint) + "</div>" : "");
+  }
+
+  function renderStandard(j) {
+    if (!j) return;
+    var n = num(j.total);
+    var lv = j.by_level || {};
+    var a = num(lv["应"]), b = num(lv["宜"]), c = num(lv["可"]);
+    var C = 2 * Math.PI * 40;
+    function seg(id, val) {
+      var e = $(id); if (!e) return;
+      var frac = n ? val / n : 0;
+      e.setAttribute("stroke-dasharray", (C * frac).toFixed(2) + " " + (C * (1 - frac)).toFixed(2));
+    }
+    seg("#v2RingA", a);
+    seg("#v2RingB", b);
+    seg("#v2RingC", c);
+    // 让三段首尾相接
+    var rb = $("#v2RingB"), rc = $("#v2RingC");
+    var off1 = -90, off2 = -90 + (n ? (a / n) * 360 : 0), off3 = off2 + (n ? (b / n) * 360 : 0);
+    if ($("#v2RingA")) $("#v2RingA").setAttribute("transform", "rotate(" + off1 + " 50 50)");
+    if (rb) rb.setAttribute("transform", "rotate(" + off2 + " 50 50)");
+    if (rc) rc.setAttribute("transform", "rotate(" + off3 + " 50 50)");
+
+    var rn = $("#v2RingN"); if (rn) rn.textContent = n ? String(n) : "—";
+    var nm = $("#v2StdName");
+    if (nm) nm.innerHTML = esc((j.standard || "").replace(/^GB\/T\s*/, "GB/T ")) +
+      "<b>" + esc(j.nature || "") + " · " + esc(j.published || "—") + " 发布 · " + esc(j.effective || "—") + " 实施</b>";
+    var sh = $("#v2StdHint"); if (sh) sh.textContent = "GB/T 47746—2026";
+    var lg = $("#v2StdLegend");
+    if (lg) {
+      lg.innerHTML = [
+        ["#1a4eda", "强制性「应」", a],
+        ["#b7791f", "推荐性「宜」", b],
+        ["#9aa5b4", "可选性「可」", c],
+        ["#d64550", "一票否决项", (j.veto_ids || []).length]
+      ].map(function (r) {
+        return '<div><i style="background:' + r[0] + '"></i>' + esc(r[1]) + "<b>" + r[2] + "</b></div>";
+      }).join("");
+    }
+    var sc = $("#v2MbSec");
+    if (sc) {
+      var secs = j.sections || [];
+      sc.innerHTML = secs.length
+        ? '<div class="v2legend">' + secs.map(function (s) {
+            return "<div><i style=\"background:linear-gradient(90deg,#1a4eda,#3b81f6)\"></i>" +
+              esc(s.key + " · " + s.name) + "<b>" + num(s.total) + " 项</b></div>";
+          }).join("") + "</div>"
+        : '<div class="v2empty">取不到章节数据</div>';
+    }
+    var lv2 = $("#v2MbLv");
+    if (lv2) {
+      var vids = j.veto_ids || [];
+      lv2.innerHTML = '<div class="v2legend">' +
+        '<div><i style="background:#1a4eda"></i>强制性「应」<b>' + a + " 项</b></div>" +
+        '<div><i style="background:#b7791f"></i>推荐性「宜」<b>' + b + " 项</b></div>" +
+        '<div><i style="background:#9aa5b4"></i>可选性「可」<b>' + c + " 项</b></div>" +
+        '<div><i style="background:#d64550"></i>一票否决项<b>' + vids.length + " 项</b></div>" +
+        "</div>" + (vids.length
+          ? '<div style="margin-top:10px"><div class="v2chips">' + vids.map(function (v) {
+              return '<span class="v2chip v2bad"><b>' + esc(v) + "</b></span>";
+            }).join("") + "</div></div>"
+          : "");
+    }
+  }
+
+  function renderTools(j) {
+    if (!j) return;
+    var ts = j.tools || [];
+    var box = $("#v2Chips");
+    var tx = $("#v2ToolTx");
+    if (tx) tx.textContent = ts.length ? ts.length + " 个" : "—";
+    if (box) {
+      box.innerHTML = ts.length
+        ? ts.map(function (t) {
+            return '<span class="v2chip" title="' + esc(t.desc) + '"><b>' + esc(t.name) + "</b>" +
+              esc(String(t.desc || "").slice(0, 14)) + "</span>";
+          }).join("")
+        : '<span class="v2empty">取不到工具清单</span>';
+    }
+    var mb = $("#v2MbTools");
+    if (mb) {
+      mb.innerHTML = ts.length
+        ? '<div class="v2legend">' + ts.map(function (t) {
+            return "<div><i style=\"background:linear-gradient(90deg,#1a4eda,#3b81f6)\"></i>" +
+              "<b style=\"color:var(--fg)\">" + esc(t.name) + "</b>&nbsp;" + esc(t.desc) + "<b></b></div>";
+          }).join("") + "</div>" +
+          '<div style="margin-top:10px;font-size:11.5px;color:var(--dim)">通道：' + esc(j.transport || "—") + "</div>"
+        : '<div class="v2empty">取不到工具清单</div>';
+    }
+  }
+
+  function renderAudit(j) {
+    if (!j) return;
+    var items = j.items || [];
+    var n = $("#v2AuditN");
+    if (n) n.textContent = "累计 " + num(j.total) + " 条";
+    var box = $("#v2Stream");
+    if (box) {
+      box.innerHTML = items.length
+        ? items.slice(0, 24).map(evHTML).join("")
+        : '<div class="v2empty">暂无事件 · 发一句话就有了</div>';
+    }
+    var mb = $("#v2MbAudit");
+    if (mb) {
+      mb.innerHTML = items.length
+        ? '<div class="v2stream" style="max-height:320px">' + items.slice(0, 30).map(evHTML).join("") + "</div>"
+        : '<div class="v2empty">暂无事件</div>';
+    }
+  }
+  function evHTML(it) {
+    var k = it.kind || "";
+    var ts = String(it.ts || "");
+    var hm = ts.length >= 19 ? ts.slice(11, 19) : (ts || "—");
+    var meta = [];
+    if (it.route) meta.push("路由 " + it.route);
+    if (it.mode) meta.push("模式 " + it.mode);
+    if (it.src != null) meta.push("来源 " + it.src);
+    if (it.sources != null) meta.push("来源 " + (Array.isArray(it.sources) ? it.sources.length : it.sources));
+    if (it.text) meta.push(String(it.text).slice(0, 26));
+    if (it.verdict) meta.push("结论 " + it.verdict);
+    if (it.ticket) meta.push("工单 " + it.ticket);
+    if (it.reason) meta.push(String(it.reason).slice(0, 26));
+    if (it.passed != null) meta.push("通过 " + it.passed);
+    return '<div class="v2ev" data-k="' + esc(kindGroup(k)) + '">' +
+      '<span class="t">' + esc(hm) + "</span>" +
+      '<span class="n">' + esc(kindCN(k)) + "</span>" +
+      (meta.length ? '<span class="m">' + meta.slice(0, 3).map(function (m) {
+        return "<em>" + esc(m) + "</em>";
+      }).join("") + "</span>" : "") +
+      "</div>";
+  }
+
+  function nowHM() {
+    var d = new Date();
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2) + ":" + ("0" + d.getSeconds()).slice(-2);
+  }
+
+  /* ------------------------------------------------------------------ 启动 */
+  /* ------------------ 全屏：只看数字人 + 直接语音对话 ------------------
+     全屏由原脚本 #btnFull 发起（已自带 VOICE_LOOP 开麦 + 退出关麦，不另造一套）。这里只叠加三件事：
+       ① 全屏态给 body 打标 → CSS 摘掉工具栏/状态条/按钮，只留数字人；
+       ② 补一个可见的「退出全屏」键（原控件被摘掉了，必须留退路）；
+       ③ 若是别的入口进的全屏（F11 / 浏览器控件），补上原脚本只在按钮路径做的开麦。
+     不改原脚本的 fullscreenchange，只做叠加。 */
+  var FS_BY_BTN = false, FS_MIC_ARMED = false;
+  function fsActive() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+
+  function fsSync() {
+    var on = fsActive();
+    try { document.body.classList.toggle("v2fs", on); } catch (e) {}
+    if (!on) { FS_MIC_ARMED = false; return; }
+    if (FS_BY_BTN || FS_MIC_ARMED) return;   // 按钮路径原脚本自己会开麦，别重复触发
+    FS_MIC_ARMED = true;
+    try { VOICE_LOOP = true; } catch (e) {}
+    setTimeout(function () {
+      if (fsActive() && VOICE_ON && !micOn()) { try { toggleMic(); } catch (e) {} }
+    }, 700);
+  }
+
+  function buildFs() {
+    var box = document.querySelector("section.stage") || document.body;
+    if (!document.getElementById("v2fsExit")) {
+      var b = document.createElement("button");
+      b.id = "v2fsExit"; b.type = "button"; b.title = "退出全屏（Esc）";
+      b.textContent = "✕ 退出全屏";
+      b.onclick = function () { try { document.exitFullscreen(); } catch (e) {} };
+      // 必须挂在被全屏的那个元素内部：全屏元素会被提到浏览器顶层（top layer），
+      // 挂在 body 上的浮层会被压在它下面 → 看不见也点不到（实测退出键被 #v2poster 盖住）。
+      box.appendChild(b);
+    }
+    // 捕获阶段先于原脚本 onclick 记录「是不是按按钮进的全屏」
+    document.addEventListener("click", function (e) {
+      var t = e.target;
+      if (t && t.id === "btnFull") { FS_BY_BTN = true; setTimeout(function () { FS_BY_BTN = false; }, 2500); }
+    }, true);
+
+    document.addEventListener("fullscreenchange", function () {
+      fsSync();
+      // 画面尺寸变了要通知 SDK，否则数字人被裁
+      setTimeout(function () { try { if (typeof AGENT !== "undefined" && AGENT && AGENT.resize) AGENT.resize(); } catch (e) {} }, 320);
+    });
+    document.addEventListener("webkitfullscreenchange", fsSync);
+    fsSync();
+  }
+
+  function boot() {
+    buildBar();
+    buildLeft();
+    buildRight();
+    buildModal();
+    buildPoster();
+    buildVoice();
+    buildFs();
+    pull();
+    setInterval(pull, POLL_MS);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+
+  // 暴露给调试用（不改动任何原逻辑）
+  window.__v2 = {
+    pull: pull,
+    applyTheme: applyTheme,
+    cache: CACHE,
+    speakGuide: speakGuide,
+    fs: function () {
+      return {
+        active: fsActive(), byBtn: FS_BY_BTN, armed: FS_MIC_ARMED,
+        cls: document.body.className,
+        exitShown: !!document.getElementById("v2fsExit") && getComputedStyle(document.getElementById("v2fsExit")).display !== "none",
+        hidden: ["viewbar", "states", "acts", "embody", "tools"].map(function (i) {
+          var e = document.getElementById(i); return i + "=" + (e ? getComputedStyle(e).display : "n/a");
+        }),
+        el: document.fullscreenElement ? (document.fullscreenElement.className || document.fullscreenElement.tagName) : null,
+        loop: (typeof VOICE_LOOP !== "undefined") ? VOICE_LOOP : "n/a"
+      };
+    },
+    voice: function () {
+      return {
+        on: VOICE_ON, guide: GUIDE_STATE, ch: GUIDE_CH, perm: MIC_PERM,
+        hintDone: HINT_DONE, mic: micOn(), ready: agentReady(),
+        voiceReady: avatarVoiceReady(), unavailable: avatarUnavailable()
+      };
+    }
+  };
+})();
+
+</script>
+</body>
+</html>

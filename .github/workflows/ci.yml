@@ -67,7 +67,7 @@ jobs:
           nohup python scripts/dev_server.py --port 8080 --backend http://127.0.0.1:8011 &
           for i in $(seq 1 40); do curl -sf http://127.0.0.1:8080/api/health && break || sleep 1; done
           curl -sf http://127.0.0.1:8080/api/health
-      - name: 60 条解决率回归（要求解决率 ≥90% 且高风险全部转人工）
+      - name: 61 条解决率回归（要求解决率 ≥90% 且高风险全部转人工）
         run: python scripts/run_regression.py
       - name: 22 项验收（合规模块 / 转人工闭环 / 记忆 / 熔断 / 密钥边界）
         run: python scripts/acceptance_check.py
