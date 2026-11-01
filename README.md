@@ -261,3 +261,13 @@ Apache-2.0（见 `LICENSE`）。第三方依赖与许可清单见 `docs/dependen
 能力边界与明确不做的清单见 `docs/风险与边界.md`。
 
 > 本仓库不含任何真实客户数据、企业知识库原文与商业报价；示例语料均为虚构。
+
+---
+
+## 关于合尘猫 SavantCat
+
+本仓库是「合尘猫 SavantCat」的开源作品之一。我们把企业知识库、AI 客服与中国 AI 合规的落地方法、可核验的工具与自查资料放在官网：**https://savantcat.cn**
+
+- 企业知识库与 AI 客服落地：https://savantcat.cn/enterprise-kb.html
+- AI 客服国标 GB/T 47746—2026 自查：https://savantcat.cn/ai-compliance-check.html
+- 开源作品与工具入口：https://savantcat.cn/products.html
