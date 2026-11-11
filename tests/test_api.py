@@ -29,8 +29,11 @@ def test_standard_endpoint_returns_61(client):
 def test_selfcheck_without_answers_uses_demo_baseline(client):
     d = client.post("/api/selfcheck", json={}).json()
     assert d["baseline"] is True
-    assert d["summary"]["total"] == 61
-    assert "示例企业现状" in d["verdict_reason"]
+    # 公开 demo 只跑 8 项样例；完整 61 项在按次付费接口 /api/gb61，不在 demo 暴露
+    assert d["sample"] is True
+    assert d["sample_size"] == 8
+    assert d["summary"]["total"] == 8
+    assert "示例" in d["verdict_reason"]
     assert d["markdown"].startswith("# AI 客服国标自查体检报告")
 
 
