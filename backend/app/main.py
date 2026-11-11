@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -236,18 +237,129 @@ def _slot_of(sid: str) -> dict | None:
     return SLOTS.get(sid)
 
 
+# ------------------------------------------------ 会话持久化 + 关闭重试队列
+# ★ 2026-10-16 修复：原先「通知平台关闭会话」跑在 daemon 线程里（进程一退线程即被掐），
+#   且 xsid 未绑定时整段静默跳过 —— 实测导致平台会话从未被关闭、持续挂账计费。
+#   改为：SLOTS 落盘 + 关闭动作写进落盘重试队列，由清扫器持续重试直到成功。
+STATE_DIR = Path(os.getenv("STATE_DIR", str(Path(__file__).resolve().parent.parent / "state")))
+SLOTS_FILE = STATE_DIR / "slots.json"
+STOPQ_FILE = STATE_DIR / "pending_stops.jsonl"
+STOP_MAX_ATTEMPTS = int(os.getenv("STOP_MAX_ATTEMPTS", "8"))
+
+
+def _state_dir() -> Path:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return STATE_DIR
+
+
+def _save_slots() -> None:
+    try:
+        _state_dir()
+        tmp = SLOTS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(SLOTS, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, SLOTS_FILE)
+    except OSError:
+        pass
+
+
+def _load_slots() -> None:
+    """启动时恢复槽位；凡还持有平台会话号的，一律补一次关闭（重启不再丢账）。"""
+    try:
+        raw = json.loads(SLOTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    now = time.time()
+    for sid, s in (raw or {}).items():
+        if not isinstance(s, dict):
+            continue
+        if s.get("xsid"):
+            _enqueue_stop(s["xsid"], sid, "startup_replay")
+        elif now < float(s.get("until") or 0):
+            SLOTS[sid] = s          # 仍有效但尚未绑定平台会话的，继续保留
+    _save_slots()
+
+
+def _stopq_load() -> list:
+    try:
+        return [json.loads(l) for l in STOPQ_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def _stopq_save(items: list) -> None:
+    try:
+        _state_dir()
+        tmp = STOPQ_FILE.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in items), encoding="utf-8")
+        os.replace(tmp, STOPQ_FILE)
+    except OSError:
+        pass
+
+
+def _enqueue_stop(xsid, sid: str, reason: str) -> None:
+    """把「关闭平台会话」写进落盘队列（幂等，同一 xsid 不重复入队）。"""
+    if not xsid:
+        record_audit({"kind": "avatar-stop-skipped", "session_id": sid, "reason": reason,
+                      "why": "xsid 缺失：平台会话号未绑定，无法关闭平台侧会话"})
+        return
+    items = _stopq_load()
+    if any(x.get("xsid") == xsid for x in items):
+        return
+    items.append({"xsid": xsid, "session_id": sid, "reason": reason,
+                  "attempts": 0, "next_at": time.time()})
+    _stopq_save(items)
+
+
+def _drain_stopq() -> dict:
+    """重试关闭平台会话：成功才出队；失败按退避重排；超次数留档报警。"""
+    items = _stopq_load()
+    if not items:
+        return {"pending": 0, "done": 0, "failed": 0}
+    now = time.time()
+    keep, done, failed = [], 0, 0
+    for it in items:
+        if now < float(it.get("next_at") or 0):
+            keep.append(it)
+            continue
+        if int(it.get("attempts") or 0) >= STOP_MAX_ATTEMPTS:
+            failed += 1
+            record_audit({"kind": "avatar-stop-giveup", "session_id": it.get("session_id"),
+                          "platform_session": str(it.get("xsid"))[:24],
+                          "attempts": it.get("attempts"), "last_error": it.get("last_error")})
+            continue
+        res = _stop_xmov_session(it["xsid"], it.get("reason") or "retry")
+        if res.get("ok"):
+            done += 1
+            record_audit({"kind": "avatar-stop", "session_id": it.get("session_id"),
+                          "platform_session": str(it.get("xsid"))[:24],
+                          "attempts": it.get("attempts"), "via": it.get("reason")})
+            continue
+        it["attempts"] = int(it.get("attempts") or 0) + 1
+        it["next_at"] = now + min(300, 10 * (2 ** it["attempts"]))
+        it["last_error"] = res
+        keep.append(it)
+        record_audit({"kind": "avatar-stop-retry", "session_id": it.get("session_id"),
+                      "attempts": it["attempts"], "error_code": res.get("error_code"),
+                      "error_reason": str(res.get("error_reason"))[:60]})
+    _stopq_save(keep)
+    return {"pending": len(keep), "done": done, "failed": failed}
+
+
 def _release_slot(sid: str, reason: str) -> None:
     s = SLOTS.pop(sid, None)
     if not s:
         return
-    if s.get("xsid"):               # 顺手结束平台会话，立刻把名额还回去
-        record_audit({"kind": "avatar-stop", "session_id": sid,
-                      "gateway": _stop_xmov_session(s["xsid"], reason)})
+    # ★ 2026-10-16：改写入落盘重试队列（原 daemon 线程 + 静默跳过已废）。
+    _enqueue_stop(s.get("xsid"), sid, reason)
     secs = max(0.0, min(time.time() - s["start"], float(AVATAR_TTL)))
     DAY["seconds"] += secs
     record_audit({"kind": "avatar-release", "session_id": sid, "seconds": round(secs, 1),
                   "reason": reason, "day_seconds": round(DAY["seconds"], 1),
-                  "est_points": _points_used()})
+                  "est_points": _points_used(), "xsid_bound": bool(s.get("xsid"))})
+    _save_slots()
 
 
 def _sign_xmov(path: str, body: dict) -> dict:
@@ -269,10 +381,15 @@ def _sign_xmov(path: str, body: dict) -> dict:
 
 
 
-def _stop_xmov_session(xsid: str, reason: str = "admin_release") -> str:
-    """主动结束平台会话（DELETE），把并发=1 的房间立刻还回去。"""
+def _stop_xmov_session(xsid: str, reason: str = "admin_release") -> dict:
+    """主动结束平台会话（DELETE），把房间立刻还回去。
+
+    ★ 2026-10-16 修复：旧版对返回值只看 error_code 不判成败，也不重试 ——
+    平台没关掉我们也不知道（实测 26 次代理、0 条关闭回执）。
+    现返回结构化结果，成功判据 = error_code 为 0 或 None。
+    """
     if not (xsid and APP_ID and APP_SECRET):
-        return "无会话可释放"
+        return {"ok": False, "error_code": None, "error_reason": "缺少 xsid 或凭证"}
     path = "/" + GATEWAY.split("//", 1)[-1].split("/", 1)[-1] if "//" in GATEWAY else GATEWAY
     compact = json.dumps({"session_id": xsid, "stop_reason": reason},
                          sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -284,9 +401,12 @@ def _stop_xmov_session(xsid: str, reason: str = "admin_release") -> str:
         with httpx.Client(timeout=12) as c:
             r = c.request("DELETE", GATEWAY, content=compact.encode(), headers=headers)
         d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        return f"error_code={d.get('error_code')}"
+        code = d.get("error_code") if isinstance(d, dict) else None
+        return {"ok": code in (0, None), "error_code": code,
+                "error_reason": (d.get("error_reason") if isinstance(d, dict) else None),
+                "http": r.status_code}
     except Exception as e:
-        return f"释放失败（{type(e).__name__}）"
+        return {"ok": False, "error_code": None, "error_reason": f"{type(e).__name__}"}
 
 
 
@@ -357,10 +477,11 @@ def create_session(request: Request) -> dict:
                   "xsid": None, "ws": ""}
     DAY["sessions"] += 1
     IP_USE[ip] = IP_USE.get(ip, 0) + 1
+    _save_slots()          # ★ 建槽即落盘：容器在会话存活期重启也能对回账并补发关闭
     record_audit({"kind": "avatar-open", "session_id": sid, "ip": ip, "ttl": AVATAR_TTL,
                   "day_sessions": DAY["sessions"], "est_points": _points_used()})
     return {**base, "mode": "online", "ttl": AVATAR_TTL,
-            "avatar": {"enabled": True, "gateway_proxy": "/api/xmov/gateway",
+            "avatar": {"enabled": True, "gateway_proxy": "/api/xmov/gateway/%s" % sid,
                        "ttl": AVATAR_TTL, "expires_at": int(now) + AVATAR_TTL,
                        "note": "会话经服务端代理建立并签名；浏览器不持有任何密钥"}}
 
@@ -446,21 +567,14 @@ def admin_release(request: Request, session_id: str = "", token: str = "") -> di
     """管理侧强制释放：立刻结束占用中的会话（并发=1，占死了就靠这个救）。"""
     if not _admin_ok(request, token):
         raise HTTPException(403, "需要管理口令（ADMIN_TOKEN）")
-    out = []
-    if session_id:
-        s = SLOTS.get(session_id)
-        if s and s.get("xsid"):
-            out.append(_stop_xmov_session(s["xsid"], "admin_force_release"))
-        if s:
-            _release_slot(session_id, "admin_force_release")
-    else:
-        for sid in list(SLOTS):
-            s = SLOTS.get(sid) or {}
-            if s.get("xsid"):
-                out.append(_stop_xmov_session(s["xsid"], "admin_force_release"))
-            _release_slot(sid, "admin_force_release")
-    return {"ok": True, "gateway": out or "无会话可释放", "busy": _slot_busy(),
-            "concurrency": AVATAR_CONCURRENCY}
+    targets = [session_id] if session_id else list(SLOTS)
+    for sid in targets:
+        if sid in SLOTS:
+            _release_slot(sid, "admin_force_release")   # 内部写入关闭队列
+    drained = _drain_stopq()                            # 立刻尝试一次，把结果当场返回
+    return {"ok": True, "released": [t for t in targets if t],
+            "stop_queue": drained, "pending": _stopq_load(),
+            "busy": _slot_busy(), "concurrency": AVATAR_CONCURRENCY}
 
 
 @app.post("/api/admin/avatar")
@@ -807,7 +921,16 @@ async def xmov_gateway_proxy(path: str, request: Request) -> dict:
     """把 SDK 发来的"统一会话接口"请求转发给真网关，并由服务端完成签名。
 
     目的：让浏览器无需持有 appId/appSecret，只连我们自己的域名。
+
+    ★ 2026-10-16：路径形如 gateway/<demo_sid>（由 /api/session 下发）。
+    SDK 只认 gatewayServer 这个地址、不带自定义头，所以会话号只能走路径传；
+    旧版靠请求头 x-demo-session 回填，而前端从不发该头 → xsid 恒为 None
+    → 平台会话从未被关闭（实测 xmov-session-bound 0 条）。
     """
+    _prefix, _sep, _tail = path.rpartition("/")
+    path_sid = _tail if _sep and "gateway" in _prefix else ""
+    if path_sid and _prefix:
+        path = _prefix
     raw = await request.body()
     body = {}
     if raw:
@@ -827,14 +950,19 @@ async def xmov_gateway_proxy(path: str, request: Request) -> dict:
     headers = {"Content-Type": "application/json", "X-APP-ID": APP_ID,
                "X-TOKEN": tok, "X-TIMESTAMP": str(ts)}
     try:
-        with httpx.Client(timeout=25) as c:
-            r = c.request(request.method, GATEWAY, content=compact.encode(), headers=headers)
+        # ★ 2026-10-11 修复：这里必须用异步客户端。
+        # 原写法 `with httpx.Client(...)` 是同步的，在 async 处理函数里会阻塞整个事件循环
+        # （timeout=25，最长卡 25 秒）。单进程 uvicorn 下这一卡就把前端所有请求拖死：
+        # 页面表现为「Failed to fetch」，数字人 SDK 的后续调用也被卡住 → 会话被判失败 →
+        # 数字人掉线。实测症状合起来就是用户报的「数字人画面未成功开启」。
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.request(request.method, GATEWAY, content=compact.encode(), headers=headers)
         out = r.json()
     except Exception as e:
         record_audit({"kind": "xmov-proxy-error", "error": f"{type(e).__name__}"})
         raise HTTPException(502, f"网关转发失败：{type(e).__name__}")
     # 把平台会话号记到对应槽位，便于管理侧强制释放
-    demo_sid = request.headers.get("x-demo-session") or ""
+    demo_sid = path_sid or request.headers.get("x-demo-session") or ""
     got = (out.get("data") or {}).get("session_id") if isinstance(out, dict) else None
     if demo_sid and got and demo_sid in SLOTS:
         SLOTS[demo_sid]["xsid"] = str(got)
@@ -863,10 +991,14 @@ async def xmov_gateway_proxy(path: str, request: Request) -> dict:
 @app.on_event("startup")
 async def _start_sweeper() -> None:
     """每 15 秒扫一次：TTL 到期 / 心跳中断 / 平台侧会话残留，都主动释放。"""
+    _load_slots()          # 重启不丢账：残留会话补发关闭
+    _drain_stopq()
+
     async def _sweeper_loop():
         while True:
             try:
                 _sweep_slots()
+                _drain_stopq()      # ★ 每轮顺带重试「关闭平台会话」
             except Exception:
                 pass
             await asyncio.sleep(15)
@@ -1040,10 +1172,12 @@ HANDOFF_REQ_KW = ("转人工", "转真人", "找人工", "要人工", "人工服
                   "客服电话", "来个人", "叫个人", "不想跟机器", "不要机器人", "别让机器人", "要真人")
 HANDOFF_TOPIC_Q = re.compile(r"哪些|什么|怎么|如何|为什么|是否|要不要|需不需要|必须|要求|标准|规定|算不算|是不是")
 
-# 离线模式的风险兜底规则（与在线路径 VETO_RULES 同一口径）。
+# 风险兜底规则集 —— 唯一真源：在线路径与离线路径共用同一份。
+# 教训：这两处原本各写一份，在线那份漏了 B8「无依据不得编造」与「投诉/法律纠纷」，
+# 导致走在线链路时该转人工却不转（红队 R08 因此不达标）。规则集不许再分叉。
 # 离线演示同样要能演全「风险识别 → 转人工 → 建单」链路：评审最可能用离线模式复现，
 # 离线看不到的能力等于没有。
-OFFLINE_VETO_RULES = (
+VETO_RULES = (
     (("身份证", "银行卡", "密码", "验证码", "转账", "支付信息"),
      "B21c 对话涉及信息安全，转人工处理", "客户问题涉及敏感信息，转人工核验"),
     (("过敏", "发烧", "受伤", "急救", "出事了", "有危险", "报警"),
@@ -1055,6 +1189,7 @@ OFFLINE_VETO_RULES = (
     (("私人手机号", "老板的电话", "员工名单", "内部名单", "内部资料", "未公开"),
      "B8 无依据信息不得编造，转人工核实", "客户索取无公开依据的信息，不编造、转人工"),
 )
+OFFLINE_VETO_RULES = VETO_RULES   # 兼容旧引用；真源在上方 VETO_RULES
 # 「转人工」话题提问的离线答复（问规则 ≠ 要求转人工，不建单、不误判为转人工）
 HANDOFF_TOPIC_ANSWER = (
     "这几种情况我们会直接转人工，不让 AI 硬答：客户明确要求人工、投诉与法律纠纷、"
@@ -1077,6 +1212,11 @@ DEMO_BASELINE_OVERRIDE = {
     "D6": "部分",       # 服务记录/工单闭环不全
 }
 DEMO_BASELINE = {i: DEMO_BASELINE_OVERRIDE.get(i, "满足") for i in sm.ids()}
+
+# 公开 demo 只展示这 8 项（含 2 项一票项）：足够演示判定分级，不构成完整 61 项报告。
+SELFCHECK_SAMPLE_IDS = ["A1", "A2", "B13", "B17", "B21a", "D1", "E1", "F1"]
+SELFCHECK_DAILY_LIMIT = 30          # 每 IP 每日演示次数（内存计数，重启归零）
+_SELFCHECK_HITS: dict[str, int] = {}
 AUDIT: list[dict] = []
 LOG_PATH = Path(__file__).resolve().parents[2] / "logs" / "audit.jsonl"
 
@@ -1105,23 +1245,56 @@ class SelfCheckIn(BaseModel):
 
 
 @app.post("/api/selfcheck")
-def selfcheck(body: SelfCheckIn) -> dict:
-    """国标自查体检：返回判定结论 + 逐项结果 + Markdown 整改清单。
+def selfcheck(body: SelfCheckIn, request: Request) -> dict:
+    """国标自查体检（示例口径）：只跑 8 项样例，完整 61 项在按次付费接口提供。
 
-    演示用法：不传 answers 时按内置「示例企业现状」出报告（便于演示判定分级与整改动作），
-    前端也可逐项勾选后重新体检，实时看结论变化。
+    这里刻意不返回全量 61 项结论：公开 demo 只演示「判定分级 + 整改动作」怎么呈现，
+    完整题库、条款原文出处、差距清单与版本更新走 /api/gb61（按次计费）。
     """
+    ip = (request.client.host if request.client else "unknown") or "unknown"
+    today = time.strftime("%Y-%m-%d")
+    key = f"{ip}:{today}"
+    used = _SELFCHECK_HITS.get(key, 0)
+    if used >= SELFCHECK_DAILY_LIMIT:
+        raise HTTPException(429, "今日演示次数已用完（每日 %d 次）。完整 61 项请走按次接口。"
+                            % SELFCHECK_DAILY_LIMIT)
+    _SELFCHECK_HITS[key] = used + 1
+
     answers = dict(body.answers or {})
     baseline = not answers
     if baseline:
         answers = dict(DEMO_BASELINE)
-    report = sm.evaluate(answers)
-    report["baseline"] = baseline
+    full = sm.evaluate(answers)
+    rows = [r for r in full["rows"] if r["id"] in SELFCHECK_SAMPLE_IDS]
+    ok = sum(1 for r in rows if r["status"] == sm.STATUS_OK)
+    partial = sum(1 for r in rows if r["status"] == sm.STATUS_PARTIAL)
+    bad = len(rows) - ok - partial
+    veto_fail = [r["id"] for r in rows if r["is_veto"] and r["status"] != sm.STATUS_OK]
+    report = {
+        "sample": True,
+        "sample_size": len(rows),
+        "sample_note": ("本接口只演示 %d 项示例；完整 61 项（48 应 + 4 宜 + 9 可，含 5 项一票项）"
+                        "与条款原文出处、差距清单走按次付费接口。" % len(rows)),
+        "verdict": "❌ 示例项里有高风险未通过" if veto_fail else "✅ 示例项全部通过",
+        "verdict_reason": ("示例口径，不代表整体合规结论；一票项未通过：" + "、".join(veto_fail)) if veto_fail
+                          else "示例口径，不代表整体合规结论。",
+        "summary": {"total": len(rows), "ok": ok, "partial": partial, "bad": bad,
+                    "miss_veto": veto_fail,
+                    "miss_mandatory": sum(1 for r in rows
+                                          if r.get("level") == "应" and r["status"] != sm.STATUS_OK),
+                    "full_total": 61},
+        "rows": rows,
+        "todo": [r for r in rows if r["status"] != sm.STATUS_OK],
+        "baseline": baseline,
+    }
     if baseline:
-        report["verdict_reason"] += "（当前为示例企业现状；换成贵司实际答复即可重算）"
-    record_audit({"kind": "selfcheck", "verdict": report["verdict"],
-                  "answered": len(answers), "miss_veto": report["summary"]["miss_veto"]})
-    report["markdown"] = sm.to_markdown(report)
+        report["verdict_reason"] += "（当前为示例企业现状）"
+    record_audit({"kind": "selfcheck", "sample": True, "ip": ip,
+                  "verdict": report["verdict"], "answered": len(answers)})
+    report["markdown"] = sm.to_markdown({"rows": rows, "summary": report["summary"],
+                                        "verdict": report["verdict"],
+                                        "verdict_reason": report["verdict_reason"],
+                                        "todo": report["todo"]})
     return report
 
 
@@ -1268,24 +1441,19 @@ async def chat(body: ChatIn) -> dict:
         if w:
             widgets.append(w)
 
-    # —— 一票项场景规则（B21a–e）：命中即转人工，且必须同步上下文 ——
-    VETO_RULES = [
-        (("身份证", "银行卡", "密码", "验证码", "转账", "支付信息"),
-         "B21c 对话涉及信息安全，转人工处理", "客户问题涉及敏感信息，转人工核验"),
-        (("过敏", "发烧", "受伤", "急救", "出事了", "有危险", "报警"),
-         "B21d 涉及人身/财产安全，立即转人工", "客户反馈人身或财产安全风险，立即转人工"),
-        (("不想跟机器", "不要机器人", "别让机器人", "叫个人来", "要真人", "转真人", "真人服务"),
-         "B21b 客户明确拒绝智能客服，立即转人工", "客户拒绝由 AI 应答，直接转人工"),
-    ]
-    for kws, reason, summary in VETO_RULES:
-        if any(k in text for k in kws):
-            w = call_tool("handoff.human", {"reason": reason, "queue": "人工坐席",
-                                            "session_id": body.session_id, "question": text,
-                                            "summary": summary,
-                                            "history": [{"role": "customer", "text": text}]})
-            if w:
-                widgets.append(w)
-            break
+    # —— 风险场景规则：命中即转人工，且必须同步上下文 ——
+    # 规则集取模块级唯一真源 VETO_RULES（与离线路径同源），不再在此另写一份。
+    # 若上面「客户主动要求人工」已出过交接卡，则不叠加第二张。
+    if not any(getattr(w, "type", None) == "handoff" for w in widgets):
+        for kws, reason, summary in VETO_RULES:
+            if any(k in text for k in kws):
+                w = call_tool("handoff.human", {"reason": reason, "queue": "人工坐席",
+                                                "session_id": body.session_id, "question": text,
+                                                "summary": summary,
+                                                "history": [{"role": "customer", "text": text}]})
+                if w:
+                    widgets.append(w)
+                break
 
     hist = SESS_HISTORY.get(body.session_id, [])
     _profile_update(body.session_id, text)
@@ -1400,6 +1568,116 @@ async def chat(body: ChatIn) -> dict:
     }
 
 
+def _sse(obj: dict) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+def _flatten(text: str) -> list[str]:
+    """整段文本按同一套切句规则拆开（非流式回退时用）。"""
+    segs, rest = _split_ready(text, min_len=4, soft_max=28)
+    if rest.strip():
+        segs.append(rest.strip())
+    return segs
+
+
+@app.post("/api/chat_stream")
+async def chat_stream(body: ChatIn) -> StreamingResponse:
+    """流式问答（P0 流式切句）：首句先出、边生成边送播报。
+
+    事件序列：meta（来源/路由）→ sentence（逐句，可直接送 TTS）→ done（完整文本 + 卡片）。
+    知识库未命中、转人工、工单、留痕这些策略仍复用 /api/chat 的唯一实现，走 fallback，
+    避免流式与非流式出现两套口径。
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text 不能为空")
+    sid = body.session_id
+
+    async def gen():
+        async def fallback(reason: str):
+            d = await chat(body)
+            yield _sse({"type": "meta", "route": d.get("route"), "sources": d.get("sources", []),
+                        "fallback": reason})
+            for seg in _flatten(d.get("text", "")):
+                yield _sse({"type": "sentence", "text": seg})
+            yield _sse({"type": "done", **{k: d.get(k) for k in
+                        ("text", "route", "sources", "evidences", "widgets", "state", "memory", "logged")}})
+
+        if DEMO_MODE == "offline" or TAKEOVER.get(sid) or KILL["stopped"] or not llm_ready():
+            async for ev in fallback("short-circuit"):
+                yield ev
+            return
+
+        docs = retrieve(text)
+        if not docs:
+            try:
+                docs = await semantic_pick(text)
+            except Exception:
+                docs = []
+        if not docs:
+            async for ev in fallback("no-docs"):
+                yield ev
+            return
+
+        hist = SESS_HISTORY.get(sid, [])
+        msgs = _ask_messages(text, docs, hist, SESS_PROFILE.get(sid))
+        t0 = time.time()
+        buf, full, first_at, sent = "", "", 0.0, 0
+        try:
+            async for delta in _llm_stream(msgs):
+                buf += delta
+                if not full and len(buf) >= 6 and buf.strip().upper().startswith("NO_INFO"):
+                    break
+                ready, buf = _split_ready(buf)
+                for seg in ready:
+                    if not full:
+                        yield _sse({"type": "meta", "route": "kb",
+                                    "sources": [t for t, _a, _s in docs]})
+                    if not first_at:
+                        first_at = time.time() - t0
+                    sent += 1
+                    full += seg
+                    yield _sse({"type": "sentence", "text": seg, "i": sent,
+                                "t": round(time.time() - t0, 3)})
+            tail = buf.strip()
+            if tail:
+                if not full:
+                    yield _sse({"type": "meta", "route": "kb", "sources": [t for t, _a, _s in docs]})
+                if not first_at:
+                    first_at = time.time() - t0
+                sent += 1
+                full += tail
+                yield _sse({"type": "sentence", "text": tail, "i": sent,
+                            "t": round(time.time() - t0, 3)})
+        except Exception:
+            async for ev in fallback("stream-error"):
+                yield ev
+            return
+
+        if not full or "NO_INFO" in full[:8].upper():
+            async for ev in fallback("no-info"):
+                yield ev
+            return
+
+        answer = full.strip()
+        _remember(sid, "user", text)
+        _remember(sid, "assistant", answer)
+        _profile_update(sid, text)
+        record_audit({"kind": "chat_stream", "session_id": sid, "text": text,
+                      "sources": [t for t, _a, _s in docs], "route": "kb",
+                      "first_sentence_s": round(first_at, 3), "sentences": sent})
+        yield _sse({"type": "done", "text": answer, "route": "kb",
+                    "sources": [t for t, _a, _s in docs],
+                    "evidences": [{"src": s, "text": a} for _q, a, s in docs],
+                    "widgets": [], "state": ["Listen", "Think", "Speak"],
+                    "memory": {"turns": len(SESS_HISTORY.get(sid, [])),
+                               "profile": SESS_PROFILE.get(sid, {})},
+                    "logged": True, "first_sentence_s": round(first_at, 3), "sentences": sent})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 async def _llm_raw(sys_prompt: str, user_prompt: str, temperature: float = 0.0) -> str:
     """最小 LLM 调用（供检索判定等内部环节使用，不走 RAG 提示词）。"""
     if not llm_ready():
@@ -1483,12 +1761,10 @@ async def _triage(text: str, history: list[dict] | None, guide_used: int) -> tup
     return (action, body)
 
 
-async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
-                   history: list[dict] | None = None, profile: dict | None = None,
-                   memory_ok: bool = False) -> str:
-    """接大模型：RAG 资料 + 会话历史 + 个性化档案（多轮对话不从头开始）。"""
-    if not llm_ready():
-        return "（%s）" % llm_credentials_check()[1] + (docs[0][1] if docs else "")
+def _ask_messages(question: str, docs: list[tuple[str, str, str]],
+                  history: list[dict] | None = None, profile: dict | None = None,
+                  memory_ok: bool = False) -> list[dict]:
+    """构造 RAG 提问消息。流式与非流式共用同一份提示词，避免两条路径口径漂移。"""
     ctx = "\n".join(f"[{t}·{s}] {a}" for t, a, s in docs) or "（无检索结果，不得编造）"
     sys_prompt = ("你是企业门店的数字人员工。只依据提供的资料回答；资料不足时只回四个字符：NO_INFO"
                   "（不要编造、不要道歉、不要自行建议转人工——转不转人工由上层策略决定）。"
@@ -1507,9 +1783,18 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
     msgs = [{"role": "system", "content": sys_prompt}]
     msgs += [{"role": h["role"], "content": h["content"]} for h in (history or [])]
     msgs.append({"role": "user", "content": f"资料：\n{ctx}\n\n顾客问：{question}"})
+    return msgs
+
+
+async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
+                   history: list[dict] | None = None, profile: dict | None = None,
+                   memory_ok: bool = False) -> str:
+    """接大模型：RAG 资料 + 会话历史 + 个性化档案（多轮对话不从头开始）。"""
+    if not llm_ready():
+        return "（%s）" % llm_credentials_check()[1] + (docs[0][1] if docs else "")
     payload = {
         "model": LLM_MODEL,
-        "messages": msgs,
+        "messages": _ask_messages(question, docs, history, profile, memory_ok),
         "temperature": 0.3,
     }
     async with httpx.AsyncClient(timeout=30) as client:
@@ -1520,6 +1805,60 @@ async def _ask_llm(question: str, docs: list[tuple[str, str, str]],
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
+
+
+_SENT_END = "。！？!?；;…\n"
+_SOFT_END = "，,、：:"
+
+
+def _split_ready(buf: str, min_len: int = 8, soft_max: int = 22) -> tuple[list[str], str]:
+    """把流式缓冲切成可播报的句子（LiveTalking 的做法：够长就送 TTS，不等整段）。
+
+    规则：遇到句末标点即切；没有句末标点但缓冲超过 soft_max 字，就在最近的逗号处切；
+    这样首句通常在 8–22 字之间，既不会碎成词，也不会等一整段。
+    """
+    out: list[str] = []
+    while True:
+        idx = -1
+        for i, ch in enumerate(buf):
+            if ch in _SENT_END and i + 1 >= min_len:
+                idx = i
+                break
+        if idx == -1 and len(buf) >= soft_max:
+            for i in range(min(len(buf) - 1, soft_max), min_len - 1, -1):
+                if buf[i] in _SOFT_END:
+                    idx = i
+                    break
+        if idx == -1:
+            break
+        seg = buf[: idx + 1].strip()
+        if seg:
+            out.append(seg)
+        buf = buf[idx + 1 :]
+    return out, buf
+
+
+async def _llm_stream(msgs: list[dict]):
+    """流式取 token（OpenAI 兼容 SSE）。任何异常都向上抛，由调用方回退到非流式。"""
+    payload = {"model": LLM_MODEL, "messages": msgs, "temperature": 0.3, "stream": True}
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream(
+            "POST", f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"}, json=payload,
+        ) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    return
+                try:
+                    delta = json.loads(data)["choices"][0].get("delta", {}).get("content")
+                except Exception:
+                    continue
+                if delta:
+                    yield delta
 
 
 def _offline_reply(text: str, sid: str = "") -> dict:

@@ -644,7 +644,7 @@ async function runSelfcheck(){
   const cls = d.verdict.indexOf("✅") >= 0 ? "var(--ok)" : (d.verdict.indexOf("⚠️") >= 0 ? "var(--warn)" : "#ff6b8a");
   const todoRows = (d.todo || []).map(r =>
     `<tr><td>${r.id}${r.is_veto ? " ★" : ""}</td><td class="${r.is_veto ? 'veto' : ''}">${r.requirement.replace(/^【一票项】/, "").slice(0, 30)}…</td><td>${r.status}</td><td>${r.how_to_fix.slice(0, 26)}…</td></tr>`).join("");
-  reportCard("🩺 国标体检报告（GB/T 47746—2026 · 61 项）", `
+  reportCard("🩺 国标体检报告（GB/T 47746—2026 · 示例 8 项）", `
     <div class="verdict" style="color:${cls}">${d.verdict}</div>
     <div>${d.verdict_reason}</div>
     <div style="margin-top:6px">满足 ${s.ok} ｜ 部分 ${s.partial} ｜ 不满足 ${s.bad} ｜ 「应」未满足 ${s.miss_mandatory} 项</div>
@@ -654,7 +654,7 @@ async function runSelfcheck(){
   `);
   $("#dlReport").onclick = () => downloadText("国标整改清单.md", d.markdown);
   $("#subtitle").textContent = "已完成国标体检：" + d.verdict;
-  speak(d.verdict + "。共 61 项自查，48 项必须做到，其中五类一票项最要紧。整改清单已生成，可一键导出。");
+  speak(d.verdict + "。" + (d.sample_note || "完整 61 项见按次接口。") + "整改清单可导出。");
   setTimeout(() => setState("Listen", ["Listen"]), 6500);
 }
 
@@ -805,6 +805,15 @@ function loadSdk(url, av){
           const code = err && err.code;
           const reason = xmovReason(code, err && err.message);
           emb("SDK", "onMessage code=" + (code || "-"));
+          // ★ 2026-10-11 修复：厂商的 WARNING 不是失败。
+          // 典型警告：「有新的 speak_start 事件，但是上一轮仍未结束，触发完成结束」——它只是提示
+          // 上一轮被打断。旧代码把任何 onMessage 一律当致命错误，直接判「数字人未能开启」并停掉
+          // 心跳，等于我们自己把一个好端端的数字人拆了。这里只对真正的错误判失败。
+          const _sev = String((err && (err.level || err.severity || err.type)) || "").toUpperCase();
+          if (_sev.indexOf("WARN") >= 0 || /WARNING/i.test(reason)){
+            emb("SDK", "厂商警告（不判失败）：" + String(reason).slice(0, 40));
+            return;
+          }
           if (XMOV_NET_OK.has(Number(code))){          // 网络恢复：清失败态并重载
             emb("SDK", "网络恢复信号，清理失败态");
             AVATAR_DOWN = false;
@@ -819,6 +828,17 @@ function loadSdk(url, av){
             if (AV_TTL_TIMER){ clearInterval(AV_TTL_TIMER); AV_TTL_TIMER = null; }
             const bd = $("#modeBadge");
             if (bd){ bd.textContent = "文字 + 卡片版（网络异常）"; bd.className = "badge text"; }
+            return;
+          }
+          // ★ 2026-10-11 修复（第二层）：只有「会话/鉴权/素材」这类真错误才判死。
+          // 厂商的 Decoding error（解码抖动）等非致命消息，旧代码同样走 avatarFail，
+          // 等于一次抖动就把数字人拆成「数字人未能开启」并停掉心跳。现在只记一笔 + 尝试重连。
+          const FATAL = new Set([10001,10002,10003,10004,10005,10006,10007,
+                                 3101,3102,3103,3104,3105,3106,3107,
+                                 30001,30002,30004,30005,30006,30007]);
+          if (!FATAL.has(Number(code))) {
+            emb("SDK", "非致命厂商消息（保留数字人）：" + String(reason).slice(0, 40));
+            try { if (AGENT && typeof AGENT.reconnect === "function") AGENT.reconnect(); } catch(e){}
             return;
           }
           avatarFail("厂商 SDK 上报：" + reason, code);
@@ -1021,6 +1041,50 @@ function splitSentences(text, max){
   return out.length ? out : [String(text)];
 }
 // 播报：在线走星云（SSML 分段 + 情绪 + 动作），离线/未开放回退浏览器语音
+// 按字数估算一段中文播报要多久（约 5 字/秒，另加起播缓冲）
+function sayMs(text){ return Math.max(900, String(text).replace(/\s/g, "").length * 190 + 500); }
+
+// 流式问答：边收边播（P0 流式切句）。首句到达即开始播报，不等整段生成完。
+// 失败一律抛错，由 send() 回退到 /api/chat 整段模式，保证老路径随时可用。
+async function askStream(text){
+  const r = await fetch("/api/chat_stream", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session_id: SESSION ? SESSION.session_id : "anon", text})
+  });
+  if (!r.ok || !r.body) throw new Error("stream unavailable: " + r.status);
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", doneEv = null, spoke = 0, acc = "", chain = Promise.resolve();
+  const push = (seg) => {
+    acc += seg;
+    $("#subtitle").textContent = acc;
+    if (spoke === 0) setState("Speak", ["Speak"]);
+    spoke++;
+    chain = chain.then(async () => {
+      await say(seg, { emotion: "neutral" });
+      // 串行：等这段大约播完再送下一段，避免 SDK 判定「上一轮未结束」
+      await new Promise(res => setTimeout(res, sayMs(seg)));
+    }).catch(() => {});
+  };
+  while (true){
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0){
+      const raw = buf.slice(0, i); buf = buf.slice(i + 2);
+      const line = raw.split("\n").find(l => l.startsWith("data:"));
+      if (!line) continue;
+      let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(e){ continue; }
+      if (ev.type === "sentence") push(ev.text);
+      else if (ev.type === "done") doneEv = ev;
+    }
+  }
+  await chain;
+  if (!doneEv || !doneEv.text) throw new Error("stream incomplete");
+  doneEv.__streamed = true;
+  return doneEv;
+}
+
 async function say(text, opts){
   if (AGENT && typeof AGENT.speak === "function"){
     try{
@@ -1032,6 +1096,11 @@ async function say(text, opts){
         emb("Speak", "分段播报 " + (i + 1) + "/" + segs.length + "：" + segs[i].slice(0, 16));
         if (opts && opts.emotion) emb("Emotion", "情绪 → " + opts.emotion);
         if (opts && opts.ka) emb("KA", "关键动作 → " + opts.ka);
+        // ★ 2026-10-11 修复：分段必须串行播报。
+        // 旧写法在同一个 tick 里把每一段都当成一次新的 speak_start 发出去，厂商 SDK 判定
+        // 「有新的 speak_start 事件，但是上一轮仍未结束」并把该轮强行结束 —— 实测直接把数字人
+        // 画面打挂（页面上只剩「数字人未能开启」）。现在每段之间等它播完再发下一段。
+        if (!last) await new Promise(r => setTimeout(r, sayMs(segs[i])));
       }
       return;
     }catch(e){ console.warn("speak 失败，回退浏览器语音", e); }
@@ -1207,11 +1276,18 @@ async function send(text){
   try{
     await new Promise(r => setTimeout(r, 320));      // 聆听 → 思考（演示节奏）
     setState("Think", ["Think"]);
-    const r = await fetch("/api/chat", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({session_id: SESSION ? SESSION.session_id : "anon", text})
-    });
-    const d = await r.json();
+    // 先试流式（首句即播），失败回退整段；两条路径返回结构一致
+    let d = null;
+    try { d = await askStream(text); }
+    catch(e){ console.warn("流式不可用，回退整段", e); }
+    if (!d){
+      const r = await fetch("/api/chat", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: SESSION ? SESSION.session_id : "anon", text})
+      });
+      d = await r.json();
+      if (!r.ok){ bubble("bot", "出错：" + JSON.stringify(d).slice(0, 200)); setState("Listen"); return; }
+    }
     if (d && d.memory){
       const pf = d.memory.profile || {};
       const extra = pf.name ? "（已记住称呼：" + pf.name + "）" : "";
@@ -1219,7 +1295,6 @@ async function send(text){
       if (el) el.textContent = "🧠 记忆 " + (d.memory.turns || 0) + " 轮" + extra;
       emb("Think", "多轮上下文 " + (d.memory.turns || 0) + " 轮" + (pf.name ? " · 称呼 " + pf.name : ""));
     }
-    if (!r.ok){ bubble("bot", "出错：" + JSON.stringify(d).slice(0, 200)); setState("Listen"); return; }
     setState("Speak", d.state && d.state.length ? d.state : ["Speak"]);
     $("#subtitle").textContent = d.text;
     bubble("bot", d.text, (d.sources && d.sources.length ? "来源：" + d.sources.join(" / ") : "") +
@@ -1234,7 +1309,7 @@ async function send(text){
       $("#log").scrollTop = $("#log").scrollHeight;
     }
     (d.widgets || []).forEach(card);
-    await say(d.text, affectOf(d));
+    if (!d.__streamed) await say(d.text, affectOf(d));
     // 离线时用定时器模拟"说完回到聆听"；在线时由 SDK 的 onVoiceStateChange 回调驱动
     if (!AGENT) setTimeout(() => setState("Listen", ["Listen"]), Math.min(6000, 1200 + d.text.length * 90));
   }catch(e){
